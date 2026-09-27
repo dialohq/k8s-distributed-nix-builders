@@ -1,0 +1,36 @@
+{
+  "batches": 477,
+  "legacy_bytes": 2098131022,
+  "legacy_scan_seconds": 29.713265175,
+  "lookup_paths": 1500,
+  "lookup_seconds": [
+    0.001990889,
+    0.001672298,
+    0.001594492,
+    0.001659661,
+    0.001577719,
+    0.001566713,
+    0.001683574,
+    0.001558753,
+    0.0016545,
+    0.001551602
+  ],
+  "migration_seconds": 84.689669564,
+  "unique_paths": 31601,
+  "date": "2026-09-27",
+  "source": "private copy of cibox-0 admission JSON journals",
+  "machine": "operator host, not cibox",
+  "profile": "cargo test --release",
+  "deployed": false,
+  "lookup_median_seconds": 0.001624496,
+  "baseline": "direct Journal JSON deserialization, validation, and BTreeMap reconstruction",
+  "caveats": [
+    "Warm indexed lookups after migration",
+    "Concurrent validation builds during scan/import",
+    "Not end-to-end publication or workflow timing"
+  ],
+  "integrity_check": [
+    "ok"
+  ],
+  "database_bytes": 2103775232
+}
