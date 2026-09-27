@@ -13,4 +13,4 @@ jobs:
       - uses: nixbuild/nix-quick-install-action@2c9db80fb984ceb1bcaa77cdda3fdf8cfba92035
       - run: nix flake check -L
       - name: Privileged mount recovery
-        run: sudo "$(command -v nix)" develop path:. -c cargo test --test admissions mounted_paths -- --ignored --nocapture
+        run: sudo "$(command -v nix)" --option build-users-group '' develop path:. -c cargo test --test admissions mounted_paths -- --ignored --nocapture
