@@ -55,6 +55,8 @@ def ready():
         spec = pod['spec']
         assert not spec.get('hostPID') and not spec.get('hostNetwork')
         assert all('hostPath' not in v for v in spec['volumes'])
+    status = json.loads(execute(store, "distributed-nix", "status").stdout)
+    assert len(status) == 4
     return pods
 
 
@@ -123,7 +125,8 @@ passed('missing_peer_fails_closed')
 
 failed = execute(store, 'env', 'DISTRIBUTED_NIX_FAILPOINT=online-after-barriers',
                  'distributed-nix', 'gc', check=False)
-assert failed.returncode != 0
+assert failed.returncode == 137, (failed.returncode, failed.stderr)
+execute(store, "test", "-f", "/var/lib/distributed-nix/online-master.json")
 execute(store, 'distributed-nix', 'gc')
 passed('coordinator_crash_resume')
 
