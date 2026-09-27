@@ -9,7 +9,7 @@ nodes meet the [kernel and storage requirements](#requirements-and-current-bound
 
 ```sh
 helm upgrade --install nix-builders \
-  oci://ghcr.io/dialohq/charts/k8s-distributed-nix-builders --version 0.3.1 \
+  oci://ghcr.io/dialohq/charts/k8s-distributed-nix-builders --version 0.3.2 \
   --namespace nix-builders --create-namespace \
   --set store.storageClass=YOUR_BLOCK_STORAGE_CLASS \
   --set builders.storageClass=YOUR_BLOCK_STORAGE_CLASS

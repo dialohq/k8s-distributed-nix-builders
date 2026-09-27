@@ -1,5 +1,16 @@
 # Portable deployment validation
 
+Version `0.3.2` passed **42 native tests** and all **10 Kubernetes checks in
+75.36 seconds** on the three-node OpenEBS LVM cluster. The added check replaces a
+cached NFS directory ten times and immediately admits each replacement through
+native Nix, verifying its new NAR without waiting for attribute-cache expiry.
+The deployment uses 600-second immutable-path attribute caching; native admission
+explicitly refreshes metadata. This suite still includes pod/container recovery,
+missing-peer rejection and a build held at a FIFO barrier during online GC.
+
+The artifact and independent kind validation below describe the preceding
+`0.3.1` release.
+
 The kernel-NFS image with the Rust pod supervisor was exercised on a disposable
 namespace in a three-node Kubernetes cluster on 2026-09-27. Four independent
 OpenEBS LVM PVCs hold the shared collection and private stores. Pods have no

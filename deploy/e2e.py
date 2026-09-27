@@ -6,6 +6,7 @@ import json
 import subprocess
 import time
 import uuid
+from coherence import check_recreated_path
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--namespace', default='nix-builders')
@@ -107,6 +108,8 @@ ca_output = build(builders[0], ca)
 for pod in builders[1:]:
     assert eventually(lambda pod=pod: build(pod, ca, no_build=True)) == ca_output
 passed('content_addressed_reuse')
+check_recreated_path(execute, store, builders[1])
+passed('recreated_path_native_admission')
 replace(builders[2])
 assert build(builders[2], plain, no_build=True) == output
 passed('builder_replacement')
