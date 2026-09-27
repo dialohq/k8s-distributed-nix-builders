@@ -276,7 +276,7 @@ impl Cluster {
                 })
                 .collect::<Result<Vec<_>>>()
         })?;
-        let result = json!({"batch":id,"paths":paths,"records":m.paths.len(),"canonicalized_paths":canonicalized,"origin_committed":true,"publish_seconds":publish_seconds,"total_seconds":start.elapsed().as_secs_f64(),"admissions":results});
+        let result = json!({"batch":id,"paths":paths,"records":m.paths.len(),"published_paths":m.paths.keys().collect::<Vec<_>>(),"canonicalized_paths":canonicalized,"origin_committed":true,"publish_seconds":publish_seconds,"total_seconds":start.elapsed().as_secs_f64(),"admissions":results});
         durable(
             &self
                 .repo
