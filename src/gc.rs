@@ -597,6 +597,8 @@ mod checkpoint_tests {
         fs::create_dir_all(destination.parent().unwrap())?;
         fs::copy(physical(&node.lower, &path), &destination)?;
         crate::native::register(&node.root, &manifest)?;
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&destination, fs::Permissions::from_mode(0o644))?;
         fs::write(&destination, "")?;
         let dead = BTreeSet::from([path.clone()]);
         ensure!(crate::native::gc_delete(&node.root, &dead).is_err());
