@@ -9,7 +9,7 @@ nodes meet the [kernel and storage requirements](#requirements-and-current-bound
 
 ```sh
 helm upgrade --install nix-builders \
-  oci://ghcr.io/dialohq/charts/k8s-distributed-nix-builders --version 0.3.2 \
+  oci://ghcr.io/dialohq/charts/k8s-distributed-nix-builders --version 0.4.0 \
   --namespace nix-builders --create-namespace \
   --set store.storageClass=YOUR_BLOCK_STORAGE_CLASS \
   --set builders.storageClass=YOUR_BLOCK_STORAGE_CLASS
@@ -50,7 +50,7 @@ The store pod serves NFSv4 using Linux kernel NFSD in its own network namespace 
 - Pool membership is chosen at installation and recorded on each PVC. Resizing an existing pool is deliberately rejected until a retirement protocol exists. Missing participants prevent GC. Do not force-delete a pod whose old process may still be running.
 - Roots acquired through a builder remain pinned for that pod's lifetime. Replacing the pod retires those pins after surviving leases close, while keeping its database and cache. This is conservative, not per-job reclamation.
 - A single store pod is a storage availability dependency. Pod replacement recovers its PVC; this is not a highly available NFS service.
-- Nix is pinned to **2.33.6** because the C++ integration is version-sensitive. The Helm deployment supplies a builder pool; ARC runner scheduling/job attachment remains an integration concern, not an operator feature.
+- Nix is pinned to **2.33.6** because the C++ integration is version-sensitive. The optional ARC image and authenticated runner attachment are described in [deploy/ARC.md](deploy/ARC.md). ARC clients reserve one slot per warm builder; increasing ARC runner counts does not resize pool membership.
 
 Conflicting content-addressed realisations remain errors and retain their pending roots. Unrelated outputs continue publishing. The system does not resolve nondeterministic build outputs.
 
