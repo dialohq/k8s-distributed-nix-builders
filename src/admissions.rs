@@ -1,6 +1,6 @@
 //! Local admission bookkeeping, separate from the native Nix database.
 use crate::{
-    node::{Journal, Kind, Status, journals, load_journal},
+    node::{Journal, Kind, Status},
     util::{failpoint, syncdir},
 };
 use anyhow::{Result, ensure};
@@ -35,11 +35,6 @@ impl Admissions {
                     kind TEXT NOT NULL CHECK(kind IN ('local','symlink','copy','mount-dir','mount-file'))
                 ) WITHOUT ROWID;",
             )?;
-            for file in journals(directory)? {
-                let journal = load_journal(&file)?;
-                Self::insert(&tx, &journal)?;
-                failpoint("admissions-during-migration");
-            }
             tx.execute_batch("PRAGMA user_version=1;")?;
             tx.commit()?;
             syncdir(directory)?;

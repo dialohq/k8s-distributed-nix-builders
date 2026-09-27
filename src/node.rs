@@ -182,15 +182,6 @@ pub(crate) fn journals(d: &Path) -> Result<Vec<PathBuf>> {
     ps.sort();
     Ok(ps)
 }
-pub(crate) fn load_journal(p: &Path) -> Result<Journal> {
-    let j: Journal = serde_json::from_value(read_json(p)?)?;
-    j.validate(
-        p.file_stem()
-            .and_then(|s| s.to_str())
-            .context("journal name")?,
-    )?;
-    Ok(j)
-}
 fn pathlocks(root: &Path, paths: impl Iterator<Item = String>, count: usize) -> Result<Vec<Lock>> {
     // SAFETY: initialized rlimit pointer, platform constants supplied by libc.
     unsafe {

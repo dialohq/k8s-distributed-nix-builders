@@ -41,9 +41,6 @@ fn subprocess() -> Result<()> {
     };
     let directory = Path::new(&directory);
     match std::env::var("ADMISSIONS_TEST_ACTION")?.as_str() {
-        "import" => {
-            Admissions::open(directory)?;
-        }
         "insert" => {
             Admissions::open(directory)?.begin(&journal("new", Kind::Copy))?;
         }
@@ -52,25 +49,6 @@ fn subprocess() -> Result<()> {
         }
         _ => panic!("unknown test action"),
     }
-    Ok(())
-}
-
-#[test]
-fn legacy_import_is_atomic_and_only_happens_once() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let j = journal("old", Kind::MountDir);
-    let id = j.manifest.id()?;
-    let legacy = temp.path().join(format!("{id}.json"));
-    durable(&legacy, &j)?;
-    child(temp.path(), "import", "admissions-during-migration")?;
-    let db = Admissions::open(temp.path())?;
-    ensure!(db.ids()? == vec![id.clone()]);
-    ensure!(matches!(db.get(&id)?.unwrap().status, Status::Pending));
-    db.commit(&id)?;
-    drop(db);
-    fs::write(legacy, "archival JSON is no longer read")?;
-    let db = Admissions::open(temp.path())?;
-    ensure!(matches!(db.get(&id)?.unwrap().status, Status::Committed));
     Ok(())
 }
 
@@ -103,18 +81,12 @@ fn failed_and_killed_transactions_never_leave_partial_plans() -> Result<()> {
 }
 
 #[test]
-fn corrupt_legacy_and_index_data_fail_closed() -> Result<()> {
+fn corrupt_index_data_fail_closed() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let j = journal("old", Kind::Copy);
     let id = j.manifest.id()?;
-    let legacy = temp.path().join(format!("{id}.json"));
-    durable(&legacy, &j)?;
-    let mut corrupt = j.clone();
-    corrupt.plan.clear();
-    durable(&legacy, &corrupt)?;
-    ensure!(Admissions::open(temp.path()).is_err());
-    durable(&legacy, &j)?;
-    let db = Admissions::open(temp.path())?;
+    let mut db = Admissions::open(temp.path())?;
+    db.begin(&j)?;
     let connection = rusqlite::Connection::open(temp.path().join("admissions.sqlite"))?;
     connection.execute("UPDATE paths SET kind='local'", [])?;
     ensure!(db.get(&id).is_err());
@@ -305,46 +277,5 @@ fn mounted_paths_recover_and_concurrent_admissions_keep_their_kinds() -> Result<
             .args(["store", "verify", "--no-trust"])
             .args(&paths),
     )?;
-    Ok(())
-}
-
-#[test]
-#[ignore = "benchmark a private copy of legacy admissions via ADMISSIONS_BENCH_DIRECTORY"]
-fn benchmark_legacy_history() -> Result<()> {
-    use std::time::Instant;
-    let directory = std::env::var("ADMISSIONS_BENCH_DIRECTORY")?;
-    let directory = Path::new(&directory);
-    let start = Instant::now();
-    let mut known = BTreeMap::new();
-    let mut bytes = 0;
-    for entry in fs::read_dir(directory)? {
-        let file = entry?.path();
-        if file.extension().is_some_and(|s| s == "json") {
-            bytes += file.metadata()?.len();
-            let j: Journal = serde_json::from_slice(&fs::read(&file)?)?;
-            j.validate(file.file_stem().unwrap().to_str().unwrap())?;
-            known.extend(j.plan);
-        }
-    }
-    let scan = start.elapsed().as_secs_f64();
-    let start = Instant::now();
-    let db = Admissions::open(directory)?;
-    let migration = start.elapsed().as_secs_f64();
-    let paths: Vec<_> = known.keys().take(1500).cloned().collect();
-    let mut timings = Vec::new();
-    for _ in 0..10 {
-        let start = Instant::now();
-        let db = Admissions::open(directory)?;
-        let result = db.known(&paths)?;
-        ensure!(result.len() == paths.len());
-        for (path, kind) in result {
-            ensure!(known[&path] == kind);
-        }
-        timings.push(start.elapsed().as_secs_f64());
-    }
-    println!(
-        "{}",
-        json!({"legacy_bytes":bytes,"unique_paths":known.len(),"batches":db.ids()?.len(),"legacy_scan_seconds":scan,"migration_seconds":migration,"lookup_paths":paths.len(),"lookup_seconds":timings})
-    );
     Ok(())
 }

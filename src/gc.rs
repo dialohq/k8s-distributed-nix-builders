@@ -276,7 +276,7 @@ mod checkpoint_tests {
     #[test]
     fn sqlite_checkpoint_survives_interrupted_directory_swap_and_forgets_dead_paths() -> Result<()>
     {
-        for legacy in [true, false] {
+        {
             let temp = tempfile::tempdir()?;
             let node = node(temp.path());
             let paths = [KEEP, DEAD].into_iter().map(|p| (p.to_owned(), json!({"narHash":"sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","narSize":120,"references":[],"ca":null,"signatures":[],"ultimate":true}))).collect();
@@ -294,14 +294,7 @@ mod checkpoint_tests {
                 status: Status::Committed,
             };
             let active = node.base.join("admissions");
-            if legacy {
-                durable(
-                    &active.join(format!("{}.json", journal.manifest.id()?)),
-                    &journal,
-                )?;
-            } else {
-                Admissions::open(&active)?.begin(&journal)?;
-            }
+            Admissions::open(&active)?.begin(&journal)?;
             let status = Command::new(std::env::current_exe()?)
                 .args([
                     "--exact",

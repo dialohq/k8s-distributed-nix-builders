@@ -28,28 +28,9 @@ and performs the existing resumable directory swap. Retired path kinds remain
 available in the old directory for safe unmounting. The active index contains
 only retained paths after the swap.
 
-## Migration and deployment
-
-Opening an uninitialized database imports existing JSON journals and sets the
-schema version in one transaction. A malformed journal, conflicting path kind,
-or interrupted import leaves no committed partial migration. The next attempt
-retries. Imported JSON files remain as archival files and are never scanned by
-normal admission again. Newly admitted batches exist only in SQLite.
-
-The first import temporarily requires space for both the old JSON and the new
-database: approximately another 2 GB for the measured node. Old files remain in
-the retired directory after GC, following the existing epoch-retention behavior.
-This change improves admission CPU/I/O cost; it does not normalize or deduplicate
-the historical manifest payloads or optimize full reboot recovery.
-
-Deploy all admission, recovery, and GC entry points together during the existing
-drained maintenance procedure, with the publisher and automatic GC stopped.
-Do not run an older JSON-only coordinator against migrated state: archival JSON
-does not contain later admissions. A binary-only downgrade is not a valid
-rollback. Backups must include the entire quiescent admission directory and the
-matching worker state; do not delete the database to force reimport.
-
-Deploy this schema transition with all coordinator entry points on the same revision.
+A new database creates its schema atomically. JSON admission journals and their
+migration code are no longer supported. All admission, recovery, and GC entry
+points use the same controller revision.
 
 ## Measured bookkeeping cost
 
@@ -76,7 +57,7 @@ convergence time. Raw measurements: `benchmarks/admission-sqlite.json`.
 ## Validation and reproduction
 
 The package build runs the ordinary Rust suite, including real native Nix
-registration tests. Added cases kill processes during migration, before a SQLite
+registration tests. Cases kill processes before a SQLite
 commit, after a pending plan, after filesystem changes, and after native
 registration. They also check corrupt input, conflicting plans, mixed local and
 shared paths, and GC interruption between directory renames, including an empty
@@ -92,13 +73,9 @@ nix build
 nix develop -c cargo test --test admissions mounted_paths -- --ignored --nocapture
 ```
 
-The benchmark must use a disposable copy of the JSON admission directory: it
-creates a SQLite database in that directory. Do not point it at live state.
-
-```sh
-ADMISSIONS_BENCH_DIRECTORY=/absolute/path/to/private-copy \
-  nix develop -c cargo test --release --test admissions benchmark_legacy_history -- --ignored --nocapture
-```
+The historical scan/import benchmark was run before removing JSON migration
+support. Its harness remains in commit `5748d11`; the measurements above are
+archived evidence, not a benchmark provided by the current implementation.
 
 The cluster deployment suite covers native NFS reuse, ARC workflow convergence,
 online collection failures and retries, and node reboot recovery.
