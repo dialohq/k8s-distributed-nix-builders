@@ -154,6 +154,22 @@ pub(crate) fn roots_named(
     syncdir(d.parent().unwrap())
 }
 
+fn replace_bootstrap_roots(root: &Path, seed: &[&str]) -> Result<()> {
+    roots_named(root, seed, "distributed-nix-bootstrap")?;
+    let directory = root.join("nix/var/nix/gcroots/distributed-nix-bootstrap");
+    let names: std::collections::BTreeSet<_> = seed
+        .iter()
+        .map(|path| Path::new(path).file_name().unwrap())
+        .collect();
+    for entry in fs::read_dir(&directory)? {
+        let entry = entry?;
+        if !names.contains(entry.file_name().as_os_str()) {
+            fs::remove_file(entry.path())?;
+        }
+    }
+    syncdir(&directory)
+}
+
 pub(crate) fn journals(d: &Path) -> Result<Vec<PathBuf>> {
     fs::create_dir_all(d)?;
     let mut ps = Vec::new();
@@ -445,15 +461,13 @@ impl Node {
             Path::new(&format!("{core}/bin/env")),
             &root.join("usr/bin/env"),
         )?;
-        roots_named(
-            root,
-            m["seed"]
-                .as_array()
-                .context("runtime paths")?
-                .iter()
-                .map(|v| v.as_str().unwrap_or("")),
-            "distributed-nix-bootstrap",
-        )?;
+        let seed = m["seed"]
+            .as_array()
+            .context("runtime paths")?
+            .iter()
+            .map(|v| v.as_str().context("runtime path"))
+            .collect::<Result<Vec<_>>>()?;
+        replace_bootstrap_roots(root, &seed)?;
         bind(Path::new("/dev"), &root.join("dev"))?;
         bind(Path::new("/dev/pts"), &root.join("dev/pts"))?;
         bind(Path::new("/proc"), &root.join("proc"))?;
@@ -817,5 +831,36 @@ mod mount_tests {
         assert!(!mounts.contains(Path::new("/store/rw")));
         assert!(!mounts.contains(Path::new("/store/stacked")));
         assert!(!mounts.contains(Path::new("/store/missing")));
+    }
+}
+
+#[cfg(test)]
+mod bootstrap_tests {
+    use super::*;
+    #[test]
+    fn replacing_runtime_roots_releases_old_versions_without_touching_other_roots() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let old = "/nix/store/00000000000000000000000000000000-old";
+        let current = "/nix/store/11111111111111111111111111111111-current";
+        roots_named(dir.path(), [old], "operator")?;
+        replace_bootstrap_roots(dir.path(), &[old])?;
+        replace_bootstrap_roots(dir.path(), &[current])?;
+        let roots = dir.path().join("nix/var/nix/gcroots");
+        ensure!(fs::read_dir(roots.join("distributed-nix-bootstrap"))?.count() == 1);
+        ensure!(
+            fs::read_link(
+                roots
+                    .join("distributed-nix-bootstrap")
+                    .join(Path::new(current).file_name().unwrap())
+            )? == Path::new(current)
+        );
+        ensure!(
+            fs::read_link(
+                roots
+                    .join("operator")
+                    .join(Path::new(old).file_name().unwrap())
+            )? == Path::new(old)
+        );
+        Ok(())
     }
 }
