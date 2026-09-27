@@ -34,12 +34,19 @@ they do not measure `dialo/main.yml` performance or prove compatibility with eve
 CSI driver/CNI. Existing ARC workloads remain on their current deployment during
 this isolated validation.
 
-The earlier userspace-NFS version passed the deployment suite in kind on Ubuntu
-in [run 36338175220](https://github.com/dialohq/k8s-distributed-nix-builders/actions/runs/36338175220).
-That result is historical, not evidence for the current kernel-NFS image.
-`.github/workflows/helm.yaml` now loads `nfs` and `nfsd` on the Ubuntu host and runs
-the nine checks with multiple independent builders on one kind node before
-optional image/chart publication.
+The final image also passed all nine checks in **50.39 seconds** after installation
+in kind on Ubuntu, with multiple independent builder PVCs on one Kubernetes node:
+[run 36342235167](https://github.com/dialohq/k8s-distributed-nix-builders/actions/runs/36342235167).
+The independent Ubuntu native/privileged test workflow passed in
+[run 36342215137](https://github.com/dialohq/k8s-distributed-nix-builders/actions/runs/36342215137).
+
+The successful kind workflow published version `0.3.0` of both artifacts.
+Anonymous registry manifest requests returned HTTP 200 for both:
+
+- Image: `ghcr.io/dialohq/k8s-distributed-nix-builders:0.3.0`,
+  digest `sha256:496b328deeb0b4206d3f058205d9a3852e2dda44b5e2c9ec22d89344f1331030`.
+- Chart: `oci://ghcr.io/dialohq/charts/k8s-distributed-nix-builders`,
+  version `0.3.0`, digest `sha256:1fb088b11f543f0772a1712cf4ed5c90d240940cf42c1a999bd098863001e460`.
 
 See [RACES.md](../RACES.md) for the concurrency audit, deterministic regression
 tests, and remaining assumptions.

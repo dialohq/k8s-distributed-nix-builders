@@ -4,22 +4,20 @@ A shared Nix package collection for Kubernetes, with private native Nix database
 
 ## Install with Helm
 
-Build and publish/load the OCI image before installation:
+The image and chart are public; no registry credentials are required. Ensure the
+nodes meet the [kernel and storage requirements](#requirements-and-current-boundaries).
 
 ```sh
-nix build .#image
-# Load result into your cluster's container runtime, or publish it to your registry.
-helm upgrade --install nix-builders ./deploy/chart \
+helm upgrade --install nix-builders \
+  oci://ghcr.io/dialohq/charts/k8s-distributed-nix-builders --version 0.3.0 \
   --namespace nix-builders --create-namespace \
-  --set image.repository=YOUR_REGISTRY/k8s-distributed-nix-builders \
-  --set image.tag=0.3.0 \
   --set store.storageClass=YOUR_BLOCK_STORAGE_CLASS \
   --set builders.storageClass=YOUR_BLOCK_STORAGE_CLASS
 helm test nix-builders --namespace nix-builders
 kubectl exec -n nix-builders -it nix-builders-nix-builder-0 -- nix --version
 ```
 
-Package the chart with `helm package deploy/chart`. For GitOps, create a Secret containing a 32–256 byte `token` key and set `auth.existingSecret` to its name; otherwise Helm generates and preserves the token on upgrade. Never commit a real token in values files.
+To build from source, use `nix build .#image`, load/publish the image to your cluster, and install `./deploy/chart` with the corresponding `image.repository` and `image.tag`. Package the chart with `helm package deploy/chart`. For GitOps, create a Secret containing a 32–256 byte `token` key and set `auth.existingSecret` to its name; otherwise Helm generates and preserves the token on upgrade. Never commit a real token in values files.
 
 The chart creates one store StatefulSet, a three-member warm builder StatefulSet, Services, a NetworkPolicy, and PVCs. CPU and memory requests guide scheduling; there are no resource limits by default. See [values.yaml](deploy/chart/values.yaml).
 
