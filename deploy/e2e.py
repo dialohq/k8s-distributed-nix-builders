@@ -17,6 +17,11 @@ builders = [base + '-builder-' + str(i) for i in range(3)]
 report = {}
 
 
+def passed(name):
+    report[name] = "passed"
+    print(name + ": passed", flush=True)
+
+
 def kubectl(*words, check=True, timeout=300):
     result = subprocess.run(['kubectl', '-n', args.namespace, *words], text=True,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
@@ -90,19 +95,19 @@ for pod in builders[1:]:
     assert execute(pod, 'cat', output + '/result').stdout.strip() == name
     filesystem = execute(pod, 'findmnt', '-n', '-T', output, '-o', 'FSTYPE').stdout.strip()
     assert filesystem == 'nfs4', filesystem
-report['native_build_and_shared_reuse'] = 'passed'
+passed('native_build_and_shared_reuse')
 ca = expression(name + '-ca', ca=True)
 ca_output = build(builders[0], ca)
 for pod in builders[1:]:
     assert eventually(lambda pod=pod: build(pod, ca, no_build=True)) == ca_output
-report['content_addressed_reuse'] = 'passed'
+passed('content_addressed_reuse')
 replace(builders[2])
 assert build(builders[2], plain, no_build=True) == output
-report['builder_replacement'] = 'passed'
+passed('builder_replacement')
 replace(store)
 assert execute(builders[1], 'cat', output + '/result').stdout.strip() == name
 assert build(builders[1], ca, no_build=True) == ca_output
-report['store_replacement_and_nfs_reconnect'] = 'passed'
+passed('store_replacement_and_nfs_reconnect')
 
 # A missing member must stop collection before deleting shared bytes.
 kubectl('scale', 'statefulset', base + '-builder', '--replicas=2')
@@ -114,13 +119,13 @@ try:
 finally:
     kubectl('scale', 'statefulset', base + '-builder', '--replicas=3')
 eventually(ready, timeout=300)
-report['missing_peer_fails_closed'] = 'passed'
+passed('missing_peer_fails_closed')
 
 failed = execute(store, 'env', 'DISTRIBUTED_NIX_FAILPOINT=online-after-barriers',
                  'distributed-nix', 'gc', check=False)
 assert failed.returncode != 0
 execute(store, 'distributed-nix', 'gc')
-report['coordinator_crash_resume'] = 'passed'
+passed('coordinator_crash_resume')
 
 with concurrent.futures.ThreadPoolExecutor() as pool:
     future = pool.submit(build, builders[1], expression(name + '-active', delay=15))
@@ -128,13 +133,13 @@ with concurrent.futures.ThreadPoolExecutor() as pool:
     execute(store, 'distributed-nix', 'gc')
     live = future.result(timeout=180)
     assert execute(builders[1], 'cat', live + '/result').stdout.strip() == name + '-active'
-report['build_during_gc'] = 'passed'
+passed('build_during_gc')
 
 # All pods which touched the first output are retired, then GC can reclaim it.
 for pod in builders:
     replace(pod)
 execute(store, 'distributed-nix', 'gc')
 assert execute(store, 'test', '-e', '/srv/distributed-nix/origin' + output, check=False).returncode != 0
-report['unrooted_output_collected'] = 'passed'
+passed('unrooted_output_collected')
 report['elapsed_seconds'] = round(time.monotonic() - started, 2)
 print(json.dumps(report, indent=2), flush=True)
