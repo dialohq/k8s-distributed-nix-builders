@@ -40,4 +40,4 @@ Conflicting content-addressed realisations remain errors and retain their pendin
 
 The current model requires trusted builders and privileged mount operations. The shared filesystem must retain the published data while any participant still references it; a missing participant prevents GC. A single NFS origin is not highly available.
 
-[ADMISSIONS.md](ADMISSIONS.md) describes the SQLite schema transition and its recovery contract. Binary-only rollback to a JSON-only coordinator after migration is unsafe.
+[ADMISSIONS.md](ADMISSIONS.md) describes SQLite admission bookkeeping and its recovery contract.
