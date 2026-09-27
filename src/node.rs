@@ -444,6 +444,13 @@ impl Node {
             Path::new(&format!("{core}/bin/env")),
             &root.join("usr/bin/env"),
         )?;
+        fs::write(
+            root.join("etc/nix/registry.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "version": 2, "flakes": [{"from": {"type": "indirect", "id": "nixpkgs"},
+                    "to": {"type": "path", "path": m["nixpkgs"]}, "exact": true}]
+            }))?,
+        )?;
         let seed = m["seed"]
             .as_array()
             .context("runtime paths")?

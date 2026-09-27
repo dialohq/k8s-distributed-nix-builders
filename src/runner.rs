@@ -52,12 +52,15 @@ pub fn prepare() -> Result<()> {
     for path in [
         "/work/arc",
         "/work/git",
+        "/work/cache",
         "/run/distributed-nix-runner/jobs",
         "/var/cache/cibox",
     ] {
         fs::create_dir_all(path)?;
     }
-    std::os::unix::fs::chown("/work/git", Some(1001), Some(1001))?;
+    for cache in ["/work/git", "/work/cache"] {
+        std::os::unix::fs::chown(cache, Some(1001), Some(1001))?;
+    }
     let cache = Path::new("/var/cache/cibox/git");
     if !cache.try_exists()? {
         std::os::unix::fs::symlink("/work/git", cache)?;
@@ -212,6 +215,7 @@ async fn execute(
     let mut runner = Command::new(&runtime.program);
     runner.args(["run", "--jitconfig", &start.jit_config]).env_clear()
         .env("PATH", std::env::var("PATH")?).env("HOME", work).env("RUNNER_ROOT", work)
+        .env("XDG_CACHE_HOME", "/work/cache")
         .env("USER", "runner").env("LOGNAME", "runner").env("LANG", "C.UTF-8")
         .env("SSL_CERT_FILE", "/etc/ssl/certs/ca-certificates.crt")
         .env("NIX_SSL_CERT_FILE", "/etc/ssl/certs/ca-certificates.crt")
