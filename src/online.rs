@@ -473,6 +473,7 @@ impl Node {
                     );
                     run(Command::new("umount").arg(destination))?;
                 }
+                self.gc_restore_derivation(path, kinds.get(path).copied())?;
             }
             syncdir(&root.join("nix/store"))?;
             failpoint("online-after-unmount");

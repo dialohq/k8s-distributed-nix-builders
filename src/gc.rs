@@ -409,6 +409,17 @@ impl Node {
         // Even a path needed exclusively by another node is protected locally.
         roots_named(root, keep, "distributed-nix")
     }
+    pub(crate) fn gc_restore_derivation(&self, path: &str, kind: Option<Kind>) -> Result<()> {
+        // Nix's keep-derivations traversal reads .drv contents after unmount.
+        // Retry even when the previous process died between unmount and copy.
+        if kind == Some(Kind::MountFile) && path.ends_with(".drv") {
+            let destination = physical(&self.root, path);
+            ensure!(!mountpoint(&destination)?, "derivation mount still active");
+            fs::copy(physical(&self.lower, path), &destination)?;
+            std::fs::File::open(&destination)?.sync_all()?;
+        }
+        Ok(())
+    }
     pub(crate) fn gc_sweep(&self, id: &str, node: Option<usize>) -> Result<Value> {
         let _gate = Lock::acquire(&self.base.join("maintenance.lock"), false)?;
         let p = self.gc_load_plan(id)?;
@@ -444,6 +455,7 @@ impl Node {
                     // Never lazy-unmount: busy mounts prevent the origin deletion phase.
                     run(Command::new("umount").arg(&dst))?;
                 }
+                self.gc_restore_derivation(path, kinds.get(path).copied())?;
             }
             syncdir(&root.join("nix/store"))?;
             failpoint("gc-after-unmount");
@@ -563,6 +575,36 @@ mod checkpoint_tests {
             origin: base.join("origin"),
             lower: base.join("lower"),
         }
+    }
+
+    #[test]
+    fn collection_restores_unmounted_derivations_before_native_liveness_checks() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let node = node(temp.path());
+        let expression = format!(
+            "builtins.derivation {{ name=\"large-gc\"; system=\"x86_64-linux\"; builder=\"/bin/sh\"; padding=\"{}\"; }}",
+            "x".repeat(70000)
+        );
+        let result = output(
+            Command::new("nix-instantiate")
+                .args(["--option", "build-users-group", "", "--store"])
+                .arg(&node.lower)
+                .args(["--expr", &expression]),
+        )?;
+        let path = String::from_utf8(result.stdout)?.trim().to_owned();
+        let manifest = crate::native::dump(&node.lower, std::slice::from_ref(&path))?;
+        let destination = physical(&node.root, &path);
+        fs::create_dir_all(destination.parent().unwrap())?;
+        fs::copy(physical(&node.lower, &path), &destination)?;
+        crate::native::register(&node.root, &manifest)?;
+        fs::write(&destination, "")?;
+        let dead = BTreeSet::from([path.clone()]);
+        ensure!(crate::native::gc_delete(&node.root, &dead).is_err());
+        node.gc_restore_derivation(&path, Some(Kind::MountFile))?;
+        ensure!(fs::metadata(&destination)?.len() > 65536);
+        crate::native::gc_delete(&node.root, &dead)?;
+        ensure!(!destination.exists());
+        Ok(())
     }
 
     #[test]
