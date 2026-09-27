@@ -49,7 +49,7 @@
   '';
 in pkgs.dockerTools.buildLayeredImage {
   name = "ghcr.io/dialohq/k8s-distributed-nix-builders";
-  tag = "portable";
+  tag = "0.3.0";
   contents = runtime ++ [files pkgs.path];
   includeNixDB = true;
   maxLayers = 100;

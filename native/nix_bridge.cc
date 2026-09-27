@@ -9,6 +9,7 @@
 #include "nix/store/store-api.hh"
 #include "nix/store/store-open.hh"
 #include "nix/store/daemon.hh"
+#include "nix/store/uds-remote-store.hh"
 #include "nix/store/globals.hh"
 #include "nix/store/realisation.hh"
 #include "nix/store/derivations.hh"
@@ -175,6 +176,19 @@ public:
     }
 };
 
+// This Unix socket is a gRPC proxy to another filesystem, not a local daemon.
+// Nix's ordinary UDS store reads NARs directly from the client's /nix/store.
+class TransferClientStore : public nix::UDSRemoteStore {
+public:
+    explicit TransferClientStore(nix::ref<const nix::UDSRemoteStoreConfig> config)
+        : nix::Store(*config), nix::LocalFSStore(*config), nix::RemoteStore(*config), nix::UDSRemoteStore(config) {}
+
+    void narFromPath(const nix::StorePath & path, nix::Sink & sink) override
+    {
+        nix::RemoteStore::narFromPath(path, sink);
+    }
+};
+
 nlohmann::json invoke(uint32_t op, const char *uri, const nlohmann::json &input)
 {
     if (op < DISTRIBUTED_NIX_DUMP || op > 14)
@@ -192,6 +206,8 @@ nlohmann::json invoke(uint32_t op, const char *uri, const nlohmann::json &input)
         return conflicts;
     }
     if (op == 12) {
+        if (auto proxy = store.dynamic_pointer_cast<nix::UDSRemoteStore>())
+            store = nix::make_ref<TransferClientStore>(proxy->config);
         auto target = nix::openStore(input.at("target").get<std::string>());
         nix::StorePathSet roots, closure;
         for (const auto & path : input.at("paths")) roots.insert(store->parseStorePath(path.get<std::string>()));
