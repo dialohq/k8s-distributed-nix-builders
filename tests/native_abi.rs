@@ -142,6 +142,29 @@ fn native_transaction_roundtrip_conflict_and_concurrent_calls() -> Result<()> {
             .contains("conflicting realisation"),
         "CA conflict was accepted"
     );
+    let independent_id = format!("sha256:{}!out", "2".repeat(64));
+    conflict.realisations.insert(
+        independent_id.clone(),
+        json!({
+            "id": independent_id, "outPath": paths[1].trim_start_matches("/nix/store/"),
+            "signatures": [], "dependentRealisations": {},
+        }),
+    );
+    let independent = conflict.realisation_closure(&[independent_id.clone()])?;
+    ensure!(independent.paths.len() == 1 && independent.realisations.len() == 1);
+    native::register(&target, &independent)?;
+    let blocked = conflict.realisation_closure(&[ids[1].clone()])?;
+    ensure!(blocked.realisations.len() == 2, "dependency was dropped");
+    ensure!(
+        native::register(&target, &blocked).is_err(),
+        "dependent conflict was hidden"
+    );
+    let kept = native::dump_realisations(&target, &[ca.realisations[&ids[1]].clone()])?;
+    ensure!(
+        kept["manifest"]["realisations"] == serde_json::to_value(&ca.realisations)?,
+        "existing mappings changed"
+    );
+    ensure!(conflict.realisation_closure(&["missing".into()]).is_err());
     let mut missing = ca.clone();
     missing.realisations.remove(&ids[0]);
     ensure!(

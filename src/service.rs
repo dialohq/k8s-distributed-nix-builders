@@ -397,22 +397,47 @@ impl Node {
     }
 }
 impl Cluster {
+    fn publish_ca_pending(&self, node: usize) -> Result<Vec<Value>> {
+        let ca = self.call_json(node, &["ca-outbox".into()])?;
+        if ca.is_null() {
+            return Ok(Vec::new());
+        }
+        let manifest = Manifest::parse(ca["manifest"].clone())?;
+        let ready = serde_json::from_value::<Vec<String>>(ca["ready"].clone())?;
+        ensure!(!ready.is_empty(), "CA manifest has no ready records");
+        let mut pending = vec![ready];
+        let mut rows = Vec::new();
+        while let Some(ids) = pending.pop() {
+            let subset = manifest.realisation_closure(&ids)?;
+            match self.publish_manifest(node, &subset, &[0, 1, 2]) {
+                Ok(publication) => {
+                    for batch in ids.chunks(128) {
+                        let mut args = vec!["ca-acknowledge".into()];
+                        args.extend_from_slice(batch);
+                        self.call(node, &args)?;
+                    }
+                    rows.push(publication);
+                }
+                Err(error)
+                    if ids.len() > 1
+                        && format!("{error:#}").contains("conflicting realisation") =>
+                {
+                    let middle = ids.len() / 2;
+                    pending.push(ids[middle..].to_vec());
+                    pending.push(ids[..middle].to_vec());
+                }
+                Err(error) => {
+                    rows.push(json!({"node":node,"realisations":ids,"error":format!("{error:#}")}))
+                }
+            }
+        }
+        Ok(rows)
+    }
+
     pub fn publish_pending(&self) -> Result<Value> {
         let mut rows = Vec::new();
         for n in 0..3 {
             let result = (|| -> Result<Value> {
-                let ca = self.call_json(n, &["ca-outbox".into()])?;
-                if !ca.is_null() {
-                    let m = Manifest::parse(ca["manifest"].clone())?;
-                    let publication = self.publish_manifest(n, &m, &[0, 1, 2])?;
-                    let ready = serde_json::from_value::<Vec<String>>(ca["ready"].clone())?;
-                    for batch in ready.chunks(128) {
-                        let mut args = vec!["ca-acknowledge".into()];
-                        args.extend_from_slice(batch);
-                        self.call(n, &args)?;
-                    }
-                    rows.push(publication);
-                }
                 let paths: Vec<String> =
                     serde_json::from_value(self.call_json(n, &["outbox".into()])?)?;
                 if paths.is_empty() {
@@ -429,6 +454,12 @@ impl Cluster {
                 Ok(v) => v,
                 Err(e) => json!({"node":n,"error":format!("{e:#}")}),
             });
+        }
+        for node in 0..3 {
+            match self.publish_ca_pending(node) {
+                Ok(publications) => rows.extend(publications),
+                Err(error) => rows.push(json!({"node":node,"error":format!("{error:#}")})),
+            }
         }
         Ok(json!(rows))
     }

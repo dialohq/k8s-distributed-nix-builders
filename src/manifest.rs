@@ -112,4 +112,49 @@ impl Manifest {
             Sha256::digest(serde_json::to_vec(&serde_json::to_value(self)?)?)
         ))
     }
+
+    pub fn realisation_closure(&self, ids: &[String]) -> Result<Self> {
+        let mut result = Self {
+            version: self.version,
+            roots: Vec::new(),
+            paths: BTreeMap::new(),
+            realisations: BTreeMap::new(),
+        };
+        let mut pending = ids.to_vec();
+        let mut roots = BTreeSet::new();
+        while let Some(id) = pending.pop() {
+            if result.realisations.contains_key(&id) {
+                continue;
+            }
+            let record = self.realisations.get(&id).context("missing realisation")?;
+            roots.insert(realisation_path(&record["outPath"])?);
+            pending.extend(
+                record["dependentRealisations"]
+                    .as_object()
+                    .context("realisation dependencies")?
+                    .keys()
+                    .cloned(),
+            );
+            result.realisations.insert(id, record.clone());
+        }
+        result.roots = roots.into_iter().collect();
+        let mut pending = result.roots.clone();
+        while let Some(path) = pending.pop() {
+            if result.paths.contains_key(&path) {
+                continue;
+            }
+            let info = self.paths.get(&path).context("missing closure path")?;
+            pending.extend(
+                info["references"]
+                    .as_array()
+                    .context("references")?
+                    .iter()
+                    .map(|v| v.as_str().map(String::from).context("reference path"))
+                    .collect::<Result<Vec<_>>>()?,
+            );
+            result.paths.insert(path, info.clone());
+        }
+        result.validate()?;
+        Ok(result)
+    }
 }
