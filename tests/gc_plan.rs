@@ -45,7 +45,7 @@ fn maintenance_policy_rejects_normal_gc_before_freezing() {
     };
     std::fs::write(dir.path().join("gc-maintenance-only"), "ARC\n").unwrap();
     let error = node.dispatch(&["gc-preflight".into()]).unwrap_err();
-    assert!(error.to_string().contains("drain all ARC runners"));
+    assert!(error.to_string().contains("administrator coordinator"));
     assert!(!dir.path().join("gc-active.json").exists());
     assert!(node.dispatch(&["gc-preflight-maintenance".into()]).is_ok());
 }

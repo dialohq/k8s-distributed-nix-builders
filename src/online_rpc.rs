@@ -120,9 +120,12 @@ impl Service {
             match op {
                 "preflight" => {
                     let (required, all) = service.config.pods()?;
-                    service
-                        .node
-                        .online_preflight(&request.epoch, &required, &all)
+                    let mut report =
+                        service
+                            .node
+                            .online_preflight(&request.epoch, &required, &all)?;
+                    report["index"] = json!(service.config.index);
+                    Ok(report)
                 }
                 "snapshot" => Ok(serde_json::to_value(
                     service.node.online_snapshot(request.origin)?,
@@ -282,8 +285,12 @@ pub async fn collect(
     // Finishing is idempotent even if a peer already removed its marker.
     if state["phase"] != "finish" {
         let mut pressure = false;
-        for client in &mut clients {
+        for (index, client) in clients.iter_mut().enumerate() {
             let report = client.call("preflight", &id, false, None).await?;
+            ensure!(
+                report["index"] == index,
+                "GC endpoint has the wrong node identity"
+            );
             if let Some(percent) = threshold {
                 ensure!(
                     (1..=100).contains(&percent),

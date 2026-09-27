@@ -122,3 +122,64 @@ async fn authenticated_rpc_rejects_unknown_pods_and_conflicting_epochs() -> Resu
     server.await??;
     Ok(())
 }
+
+#[tokio::test]
+async fn coordinator_rejects_duplicate_worker_identity_before_marking() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let base = temp.path();
+    let node = Node {
+        base: base.into(),
+        root: base.join("root"),
+        origin: base.join("origin"),
+        lower: base.join("lower"),
+    };
+    fs::create_dir_all(&node.root)?;
+    durable(&base.join("ready"), &json!(true))?;
+    fs::write(
+        base.join("token"),
+        "online-gc-test-012345678901234567890123456789",
+    )?;
+    fs::write(base.join("cri.json"), r#"{"items":[]}"#)?;
+    let cat = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|p| p.join("cat"))
+        .find(|p| p.is_file())
+        .unwrap();
+    let mut listeners = Vec::new();
+    for _ in 0..3 {
+        listeners.push(tokio::net::TcpListener::bind("127.0.0.1:0").await?);
+    }
+    let config = Config {
+        nodes: listeners.iter().map(|l| l.local_addr().unwrap()).collect(),
+        index: 0,
+        token_file: base.join("token"),
+        cri_command: vec![
+            cat.to_str().unwrap().into(),
+            base.join("cri.json").to_str().unwrap().into(),
+        ],
+        namespace: "arc-runners".into(),
+    };
+    let mut tasks = Vec::new();
+    for listener in listeners {
+        let (stop, stopping) = tokio::sync::oneshot::channel();
+        tasks.push((
+            stop,
+            tokio::spawn(serve(
+                listener,
+                Service::new(node.clone(), config.clone())?,
+                async {
+                    let _ = stopping.await;
+                },
+            )),
+        ));
+    }
+    let error = distributed_nix::online_rpc::collect(&node, &config, false, None)
+        .await
+        .unwrap_err();
+    ensure!(error.to_string().contains("wrong node identity"));
+    ensure!(!base.join("online-master.json").exists() && !base.join("retiring").exists());
+    for (stop, task) in tasks {
+        stop.send(()).unwrap();
+        task.await??;
+    }
+    Ok(())
+}

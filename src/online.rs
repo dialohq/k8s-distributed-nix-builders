@@ -453,9 +453,10 @@ impl Node {
                 "origin lacks coordinator plan"
             );
             ensure!(
-                master["acks"]
-                    .as_array()
-                    .is_some_and(|a| a.len() == 3 && a.iter().all(|v| v["id"] == id)),
+                master["acks"].as_array().is_some_and(|a| a.len() == 3
+                    && a.iter()
+                        .enumerate()
+                        .all(|(index, v)| v["id"] == id && v["node"] == index)),
                 "all three worker acknowledgements required"
             );
             (&self.origin, &plan.origin)
@@ -508,7 +509,7 @@ impl Node {
         let result = self.gc_native(root, "delete", &serde_json::to_value(dead)?)?;
         run(Command::new("sync").arg("-f").arg(root))?;
         failpoint("online-after-delete");
-        let row = json!({"id":id,"role":role,"result":result});
+        let row = json!({"id":id,"role":role,"node":node,"result":result});
         durable(&ack, &row)?;
         Ok(row)
     }

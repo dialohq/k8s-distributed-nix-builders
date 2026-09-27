@@ -529,7 +529,7 @@ impl Node {
                 ensure!(
                     args[0] == "gc-preflight-maintenance"
                         || !self.base.join("gc-maintenance-only").exists(),
-                    "GC requires administrator maintenance: drain all ARC runners first"
+                    "GC requires the administrator coordinator; run cibox-maintenance gc on the origin"
                 );
                 Ok(
                     json!({"active":if self.gc_active().exists(){read_json(&self.gc_active())?}else{Value::Null}}),
