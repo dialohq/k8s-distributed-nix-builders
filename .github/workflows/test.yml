@@ -1,0 +1,16 @@
+name: Test
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  nix:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: nixbuild/nix-quick-install-action@2c9db80fb984ceb1bcaa77cdda3fdf8cfba92035
+      - run: nix flake check -L
+      - name: Privileged mount recovery
+        run: sudo "$(command -v nix)" develop path:. -c cargo test --test admissions mounted_paths -- --ignored --nocapture
