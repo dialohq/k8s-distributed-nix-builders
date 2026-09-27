@@ -8,6 +8,26 @@ fn main() {
 }
 fn execute() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("arc-client") {
+        let code = tokio::runtime::Runtime::new()?.block_on(distributed_nix::arc_client::run())?;
+        std::process::exit(code);
+    }
+    if args
+        .first()
+        .is_some_and(|arg| matches!(arg.as_str(), "pod-ready" | "pod-healthy"))
+    {
+        anyhow::ensure!(
+            !std::path::Path::new(distributed_nix::runner::POISON).try_exists()?,
+            "runner cleanup failed"
+        );
+        if args[0] == "pod-ready" {
+            anyhow::ensure!(
+                std::path::Path::new("/run/distributed-nix-ready").is_file(),
+                "pod recovery incomplete"
+            );
+        }
+        return Ok(());
+    }
     if args.first().map(String::as_str) == Some("pod") {
         return distributed_nix::pod::run();
     }

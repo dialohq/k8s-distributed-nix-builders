@@ -47,7 +47,7 @@ spec:
                     app.kubernetes.io/component: {{ $role }}
       containers:
         - name: {{ $role }}
-          image: {{ printf "%s:%s" $.Values.image.repository $.Values.image.tag | quote }}
+          image: {{ default (printf "%s:%s" $.Values.image.repository $.Values.image.tag) (get $values "image") | quote }}
           imagePullPolicy: {{ $.Values.image.pullPolicy }}
           securityContext:
             privileged: true
@@ -55,6 +55,14 @@ spec:
           env:
             - name: DISTRIBUTED_NIX_ROLE
               value: {{ $role }}
+            - name: DISTRIBUTED_NIX_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            {{- if eq $role "builder" }}
+            - name: DISTRIBUTED_NIX_EXTRA_NIX_CONFIG
+              value: {{ $.Values.builders.extraNixConfig | quote }}
+            {{- end }}
             - name: DISTRIBUTED_NIX_POD_UID
               valueFrom:
                 fieldRef:
@@ -76,13 +84,17 @@ spec:
             {{- end }}
           startupProbe:
             exec:
-              command: ["/bin/sh", "-c", "test -f /run/distributed-nix-ready"]
+              command: ["/bin/distributed-nix", "pod-ready"]
             periodSeconds: 2
             failureThreshold: 600
           readinessProbe:
-            tcpSocket:
-              port: rpc
+            exec:
+              command: ["/bin/distributed-nix", "pod-ready"]
             periodSeconds: 2
+          livenessProbe:
+            exec:
+              command: ["/bin/distributed-nix", "pod-healthy"]
+            periodSeconds: 10
           volumeMounts:
             - name: data
               mountPath: /data

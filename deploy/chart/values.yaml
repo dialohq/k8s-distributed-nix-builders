@@ -1,6 +1,6 @@
 image:
   repository: ghcr.io/dialohq/k8s-distributed-nix-builders
-  tag: "0.3.2"
+  tag: "0.4.0"
   pullPolicy: IfNotPresent
 imagePullSecrets: []
 clusterDomain: cluster.local
@@ -15,6 +15,8 @@ store:
       cpu: "1"
       memory: 1Gi
 builders:
+  image: ""
+  extraNixConfig: ""
   # Stable pool membership: select at installation; do not shrink existing PVCs
   # out of the pool. An unavailable participant intentionally prevents GC.
   replicas: 3
@@ -31,3 +33,6 @@ nodeSelector:
   kubernetes.io/os: linux
   kubernetes.io/arch: amd64
 tolerations: []
+
+# Namespace and pod selectors for authenticated ARC attachment clients.
+arcClients: []

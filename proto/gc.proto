@@ -34,3 +34,19 @@ message StoreRequest {
   bytes manifest = 4;
 }
 message StoreReply { bytes json = 1; }
+
+// Runs only the image's configured GitHub runner, never caller-supplied commands.
+service RunnerPool {
+  rpc Attach(stream RunnerInput) returns (stream RunnerEvent);
+}
+message RunnerClaim { string id = 1; }
+message RunnerStart { string jit_config = 1; string user_agent = 2; }
+message RunnerInput {
+  oneof message { RunnerClaim claim = 1; RunnerStart start = 2; }
+}
+message RunnerEvent {
+  enum Kind { RESERVED = 0; STARTED = 1; OUTPUT = 2; EXITED = 3; }
+  Kind kind = 1;
+  bytes output = 2;
+  sint32 exit_code = 3;
+}

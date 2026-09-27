@@ -216,7 +216,9 @@ impl Node {
     }
     pub fn serve_with_ready(&self, ready: impl FnOnce() -> Result<()>) -> Result<Value> {
         let _group = crate::online::native_group(&self.root)?;
-        let socket = Path::new("/run/distributed-nix-runner/socket");
+        let socket_path = std::env::var("DISTRIBUTED_NIX_SOCKET_PATH")
+            .unwrap_or_else(|_| "/run/distributed-nix-runner/socket".into());
+        let socket = Path::new(&socket_path);
         if socket.exists() {
             fs::remove_file(socket)?;
         }

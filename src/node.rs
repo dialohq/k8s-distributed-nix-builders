@@ -396,6 +396,9 @@ impl Node {
         fs::set_permissions(root.join("tmp"), fs::Permissions::from_mode(0o1777))?;
         let mut passwd =
             String::from("root:x:0:0:root:/root:/bin/sh\nnobody:x:65534:65534:nobody:/:/bin/sh\n");
+        if m["githubRunner"].is_string() {
+            passwd.push_str("runner:x:1001:1001:GitHub runner:/work:/bin/bash\n");
+        }
         let mut builders = Vec::new();
         let build_group = m["buildGroupId"].as_u64().unwrap_or(30000);
         for index in 1..=32 {
@@ -410,7 +413,7 @@ impl Node {
         fs::write(
             root.join("etc/group"),
             format!(
-                "root:x:0:\nnogroup:x:65534:\nnixbld:x:{build_group}:{}\n",
+                "root:x:0:\nnogroup:x:65534:\nrunner:x:1001:\nnixbld:x:{build_group}:{}\n",
                 builders.join(",")
             ),
         )?;
@@ -456,7 +459,11 @@ impl Node {
         }
         fs::write(
             root.join("etc/nix/nix.conf"),
-            m["nixConfig"].as_str().context("runtime nixConfig")?,
+            format!(
+                "{}\n{}\n",
+                m["nixConfig"].as_str().context("runtime nixConfig")?,
+                std::env::var("DISTRIBUTED_NIX_EXTRA_NIX_CONFIG").unwrap_or_default()
+            ),
         )?;
         if !origin {
             // The runtime mounts the backend; admission only needs POSIX paths.

@@ -413,6 +413,7 @@ async fn start(role: Role, processes: &mut Processes, nfs: &mut KernelNfs) -> Re
         fs::copy(format!("{ROOT}/etc/{path}"), format!("/etc/{path}"))?;
     }
     if role == Role::Builder {
+        crate::runner::prepare()?;
         let mut command = controller(&["node", "runner-daemon", "--notify-ready"])?;
         command.stdout(Stdio::piped());
         let (_, output) = processes.spawn("native Nix daemon", &mut command, true)?;
