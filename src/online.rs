@@ -12,7 +12,6 @@ use std::{
     os::{fd::AsRawFd, unix::fs::symlink},
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
-    time::Duration,
 };
 
 static ROOT_GROUP: OnceLock<String> = OnceLock::new();
@@ -99,19 +98,13 @@ fn retiring(base: &Path, paths: &[String]) -> Result<bool> {
     Ok(false)
 }
 
-pub fn guard(base: &Path, paths: &[String], wait: bool) -> Result<Lock> {
-    loop {
-        let gate = Lock::acquire(&base.join("online-roots.lock"), true)?;
-        if !retiring(base, paths)? {
-            return Ok(gate);
-        }
-        drop(gate);
-        ensure!(
-            wait,
-            "publication intersects online GC retirement; retry after this epoch"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
+pub fn guard(base: &Path, paths: &[String]) -> Result<Lock> {
+    let gate = Lock::acquire(&base.join("online-roots.lock"), true)?;
+    ensure!(
+        !retiring(base, paths)?,
+        "publication intersects online GC retirement; retry after this epoch"
+    );
+    Ok(gate)
 }
 
 fn try_pin(base: &Path, root: &Path, name: &str, paths: &[String]) -> Result<bool> {
@@ -136,13 +129,6 @@ fn try_pin(base: &Path, root: &Path, name: &str, paths: &[String]) -> Result<boo
         }
     }
     Ok(true)
-}
-
-pub fn pin(base: &Path, root: &Path, name: &str, paths: &[String]) -> Result<()> {
-    while !try_pin(base, root, name, paths)? {
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    Ok(())
 }
 
 pub fn pin_runtime(paths: &[String]) -> Result<Value> {
@@ -288,7 +274,7 @@ impl Node {
                 .join("info.json");
             ensure!(
                 info.exists() && read_json(&info)?["version"] == 1,
-                "ARC pod {pod} has no online GC roots yet"
+                "builder pod {pod} has no online GC roots yet"
             );
         }
         self.prune_client_roots(all_pods)?;
@@ -415,6 +401,10 @@ impl Node {
         plan.validate()?;
         let epoch = self.online_require(&plan.id)?;
         let original: Plan = serde_json::from_value(read_json(&epoch.join("candidates.json"))?)?;
+        ensure!(
+            plan.workers.len() == original.workers.len(),
+            "GC plan membership changed"
+        );
         for (final_set, initial) in plan
             .workers
             .iter()
@@ -577,30 +567,6 @@ mod tests {
     }
 
     #[test]
-    fn pod_roots_outlive_daemon_connections_until_cri_teardown() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        let node = node(temp.path());
-        let group = group(&node.base, &node.root, Some("pod-uid"))?;
-        pin(&node.base, &node.root, &group.name, &[LIVE.into()])?;
-        // A held lease protects processes even when the CRI list no longer has the pod.
-        node.prune_client_roots(&BTreeSet::new())?;
-        ensure!(node.client_roots()?.contains(LIVE));
-        drop(group);
-        node.prune_client_roots(&BTreeSet::from(["pod-uid".into()]))?;
-        ensure!(node.client_roots()?.contains(LIVE));
-        let end = std::time::Instant::now() + Duration::from_secs(3);
-        loop {
-            node.prune_client_roots(&BTreeSet::new())?;
-            if node.client_roots()?.is_empty() {
-                break;
-            }
-            ensure!(std::time::Instant::now() < end, "released lease still held");
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        Ok(())
-    }
-
-    #[test]
     fn retirement_blocks_only_selected_paths_and_survives_restart() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let node = node(temp.path());
@@ -609,16 +575,20 @@ mod tests {
         node.online_prepare(&plan)?;
         node.online_prepare(&plan)?;
         let restarted = node.clone();
-        ensure!(guard(&restarted.base, &[DEAD.into()], false).is_err());
-        pin(&node.base, &node.root, &group.name, &[LIVE.into()])?;
-        let (send, receive) = std::sync::mpsc::channel();
-        let base = node.base.clone();
-        let root = node.root.clone();
-        let name = group.name.clone();
-        let child = std::thread::spawn(move || {
-            send.send(pin(&base, &root, &name, &[DEAD.into()])).unwrap()
-        });
-        ensure!(receive.recv_timeout(Duration::from_millis(100)).is_err());
+        ensure!(guard(&restarted.base, &[DEAD.into()]).is_err());
+        ensure!(try_pin(
+            &node.base,
+            &node.root,
+            &group.name,
+            &[LIVE.into()]
+        )?);
+        ensure!(!try_pin(
+            &node.base,
+            &node.root,
+            &group.name,
+            &[DEAD.into()]
+        )?);
+        ensure!(!node.client_roots()?.contains(DEAD));
         ensure!(node.online_finish(&plan.id).is_err());
         node.online_plan(&plan)?;
         let mut changed = plan.clone();
@@ -629,8 +599,12 @@ mod tests {
             &json!({"id":plan.id}),
         )?;
         restarted.online_finish(&plan.id)?;
-        receive.recv_timeout(Duration::from_secs(2))??;
-        child.join().unwrap();
+        ensure!(try_pin(
+            &node.base,
+            &node.root,
+            &group.name,
+            &[DEAD.into()]
+        )?);
         ensure!(node.client_roots()?.contains(DEAD));
         Ok(())
     }

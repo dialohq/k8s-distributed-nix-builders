@@ -12,13 +12,7 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{
-    collections::BTreeSet,
-    fs,
-    path::PathBuf,
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::{collections::BTreeSet, fs, path::PathBuf, sync::Arc};
 use subtle::ConstantTimeEq;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{
@@ -75,6 +69,7 @@ impl Service {
     pub fn new(node: Node, config: Config) -> Result<Self> {
         config.validate()?;
         let token = Arc::new(format!("Bearer {}", config.token()?).into_bytes());
+        let _membership = Lock::acquire(&node.base.join("membership.lock"), false)?;
         let identity = json!({"nodes":config.nodes,"index":config.index});
         let file = node.base.join("membership.json");
         if file.exists() {
@@ -265,6 +260,20 @@ async fn snapshots(clients: &mut [Client], id: &str) -> Result<Vec<Snapshot>> {
     Ok(result)
 }
 
+fn new_epoch_id() -> Result<String> {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).map_err(|e| anyhow::anyhow!("GC epoch randomness: {e}"))?;
+    Ok(format!("{:032x}", u128::from_le_bytes(bytes)))
+}
+
+fn reserve_epoch(node: &Node, id: &str) -> Result<()> {
+    let epoch = node.gc_epoch(id)?;
+    fs::create_dir_all(epoch.parent().unwrap())?;
+    // Never reuse an old epoch's acknowledgements, even on a random-ID collision.
+    fs::create_dir(&epoch).context("GC epoch already exists or cannot be reserved")?;
+    crate::util::syncdir(epoch.parent().unwrap())
+}
+
 pub async fn collect(
     node: &Node,
     config: &Config,
@@ -281,7 +290,7 @@ pub async fn collect(
         ensure!(!dry, "resume active epoch before preview");
         read_json(&file)?
     } else {
-        json!({"id":format!("{:032x}",SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()),"phase":"prepare", "members":config.nodes})
+        json!({"id":new_epoch_id()?,"phase":"prepare", "members":config.nodes})
     };
     ensure!(
         state["members"] == json!(config.nodes),
@@ -334,6 +343,7 @@ pub async fn collect(
         if dry {
             return Ok(json!({"dry_run":true,"plan":candidate}));
         }
+        reserve_epoch(node, &id)?;
         state["candidates"] = serde_json::to_value(candidate)?;
         durable(&file, &state)?;
     }
@@ -391,4 +401,25 @@ pub async fn collect(
 
 pub mod wire {
     tonic::include_proto!("distributed_nix.v1");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn epoch_reservation_never_reuses_previous_acknowledgements() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let node = Node {
+            base: directory.path().into(),
+            ..Node::default()
+        };
+        let id = "00000000000000000000000000000001";
+        reserve_epoch(&node, id)?;
+        let acknowledgement = node.gc_epoch(id)?.join("online-worker-swept.json");
+        durable(&acknowledgement, &json!({"old":true}))?;
+        ensure!(reserve_epoch(&node, id).is_err());
+        ensure!(read_json(&acknowledgement)? == json!({"old":true}));
+        crate::gc::valid_id(&new_epoch_id()?)?;
+        Ok(())
+    }
 }

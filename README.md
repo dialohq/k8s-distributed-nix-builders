@@ -35,7 +35,7 @@ flowchart LR
 
 Each builder retains its own writable store, SQLite database, admission journal, and recovery state. Completed outputs are copied once to the shared collection using native Nix transfer streams over gRPC. Peers register their metadata and bind-mount shared paths into their local store view. SQLite files never live on NFS. Builds execute inside the builder pod; no host Nix installation, host store mount, SSH transport, host daemon, or Kubernetes API access is required.
 
-The store pod serves NFSv4 using userspace Ganesha and coordinates online GC. It never deletes shared files before every configured participant acknowledges safe retirement. Kubernetes Service DNS supplies stable addresses. PVCs survive pod replacement and Helm uninstall. See [ONLINE_GC.md](ONLINE_GC.md) and [ADMISSIONS.md](ADMISSIONS.md).
+The store pod serves NFSv4 using userspace Ganesha and coordinates online GC. It never deletes shared files before every configured participant acknowledges safe retirement. Kubernetes Service DNS supplies stable addresses. PVCs survive pod replacement and Helm uninstall. See [ONLINE_GC.md](ONLINE_GC.md), [ADMISSIONS.md](ADMISSIONS.md), and the [concurrency audit](RACES.md).
 
 ## Requirements and current boundaries
 

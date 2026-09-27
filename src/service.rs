@@ -27,6 +27,7 @@ fn ca_key(id: &str) -> String {
     format!("{:x}", Sha256::digest(id.as_bytes()))
 }
 fn enqueue_realisation(base: &Path, root: &Path, value: &Value) -> Result<()> {
+    let _queue = Lock::acquire(&base.join("outbox.lock"), false)?;
     let id = value["id"].as_str().context("realisation ID")?;
     let path = realisation_path(&value["outPath"])?;
     let key = ca_key(id);
@@ -45,8 +46,18 @@ fn enqueue_realisation(base: &Path, root: &Path, value: &Value) -> Result<()> {
 
 fn enqueue(paths: &[String]) -> Result<Value> {
     let base = Path::new("/run/distributed-nix");
-    let roots = Path::new("/nix/var/nix/gcroots/distributed-nix-outbox");
-    fs::create_dir_all(roots)?;
+    enqueue_paths(base, Path::new("/"), paths, || Ok(()))
+}
+
+fn enqueue_paths(
+    base: &Path,
+    root: &Path,
+    paths: &[String],
+    before_roots: impl Fn() -> Result<()>,
+) -> Result<Value> {
+    let _queue = Lock::acquire(&base.join("outbox.lock"), false)?;
+    let roots = root.join("nix/var/nix/gcroots/distributed-nix-outbox");
+    fs::create_dir_all(&roots)?;
     for p in paths {
         ensure!(valid_path(p), "invalid registration event");
         let name = p.rsplit('/').next().unwrap();
@@ -54,6 +65,7 @@ fn enqueue(paths: &[String]) -> Result<Value> {
             &base.join("outbox").join(format!("{name}.json")),
             &json!({"path":p}),
         )?;
+        before_roots()?;
         let link = roots.join(name);
         match symlink(p, &link) {
             Ok(()) => (),
@@ -66,7 +78,7 @@ fn enqueue(paths: &[String]) -> Result<Value> {
             Err(e) => return Err(e.into()),
         }
     }
-    syncdir(roots)?;
+    syncdir(&roots)?;
     failpoint("outbox-before-register");
     Ok(Value::Null)
 }
@@ -145,6 +157,7 @@ pub fn native_connection(root: &str, trusted: bool) -> Result<()> {
 
 impl Node {
     pub fn ca_outbox(&self) -> Result<Value> {
+        let _queue = Lock::acquire(&self.base.join("outbox.lock"), true)?;
         let pending = crate::node::journals(&self.base.join("ca-outbox"))?
             .into_iter()
             .map(|p| read_json(&p))
@@ -152,6 +165,7 @@ impl Node {
         crate::native::dump_realisations(&self.root, &pending)
     }
     pub fn ca_acknowledge(&self, ids: &[String]) -> Result<Value> {
+        let _queue = Lock::acquire(&self.base.join("outbox.lock"), false)?;
         for id in ids {
             let key = ca_key(id);
             for file in [
@@ -247,6 +261,7 @@ impl Node {
         Ok(Value::Null)
     }
     pub fn outbox(&self) -> Result<Value> {
+        let _queue = Lock::acquire(&self.base.join("outbox.lock"), true)?;
         let dir = self.base.join("outbox");
         fs::create_dir_all(&dir)?;
         let paths = crate::node::journals(&dir)?
@@ -261,6 +276,7 @@ impl Node {
         crate::native::valid_paths(&self.root, &paths)
     }
     pub fn acknowledge(&self, paths: &[String]) -> Result<Value> {
+        let _queue = Lock::acquire(&self.base.join("outbox.lock"), false)?;
         for path in paths {
             ensure!(valid_path(path), "invalid acknowledged path");
             let name = path.rsplit('/').next().unwrap();
@@ -361,5 +377,61 @@ impl Cluster {
             durable(&self.repo.join("publisher-status.json"), &report)?;
             std::thread::sleep(Duration::from_millis(500));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn acknowledgement_cannot_interleave_entry_and_root_creation() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let node = Node {
+            base: directory.path().join("state"),
+            root: directory.path().join("root"),
+            ..Node::default()
+        };
+        let path = "/nix/store/11111111111111111111111111111111-output".to_owned();
+        std::thread::scope(|scope| -> Result<()> {
+            let (reached, at_entry) = std::sync::mpsc::channel();
+            let (resume, resumed) = std::sync::mpsc::channel();
+            let producer_node = node.clone();
+            let producer_path = path.clone();
+            let producer = scope.spawn(move || {
+                enqueue_paths(
+                    &producer_node.base,
+                    &producer_node.root,
+                    &[producer_path],
+                    || {
+                        reached.send(())?;
+                        resumed.recv()?;
+                        Ok(())
+                    },
+                )
+            });
+            at_entry.recv()?;
+            // Probe exactly while an entry exists but its root has not been made.
+            let lock = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(node.base.join("outbox.lock"))?;
+            let blocked = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            let error = std::io::Error::last_os_error();
+            // Always release the producer, including when the assertion fails.
+            resume.send(())?;
+            producer.join().unwrap()?;
+            ensure!(
+                blocked == -1 && error.kind() == std::io::ErrorKind::WouldBlock,
+                "queue mutation was visible without its lock"
+            );
+            node.acknowledge(&[path.clone()])?;
+            ensure!(crate::node::journals(&node.base.join("outbox"))?.is_empty());
+            ensure!(
+                fs::read_dir(node.root.join("nix/var/nix/gcroots/distributed-nix-outbox"))?
+                    .next()
+                    .is_none()
+            );
+            Ok(())
+        })
     }
 }
