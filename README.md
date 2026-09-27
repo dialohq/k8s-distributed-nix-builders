@@ -12,7 +12,7 @@ nix build .#image
 helm upgrade --install nix-builders ./deploy/chart \
   --namespace nix-builders --create-namespace \
   --set image.repository=YOUR_REGISTRY/k8s-distributed-nix-builders \
-  --set image.tag=portable \
+  --set image.tag=0.3.0 \
   --set store.storageClass=YOUR_BLOCK_STORAGE_CLASS \
   --set builders.storageClass=YOUR_BLOCK_STORAGE_CLASS
 helm test nix-builders --namespace nix-builders
