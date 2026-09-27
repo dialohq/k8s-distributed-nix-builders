@@ -361,3 +361,53 @@ fn native_transaction_roundtrip_conflict_and_concurrent_calls() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn online_mark_keeps_recorded_ca_deriver_without_static_output_entry() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let source = tmp.path().join("source");
+    let target = tmp.path().join("target");
+    let fixture = tmp.path().join("ca-output");
+    fs::write(&fixture, "CA output with a recorded deriver\n")?;
+    let out = String::from_utf8(
+        output(
+            Command::new("nix-store")
+                .args(["--option", "build-users-group", "", "--store"])
+                .arg(&source)
+                .arg("--add")
+                .arg(&fixture),
+        )?
+        .stdout,
+    )?
+    .trim()
+    .to_owned();
+    let drv = String::from_utf8(output(Command::new("nix-instantiate").args(["--option","build-users-group","","--store"]).arg(&source).args(["--expr",r#"builtins.derivation { name="ca-deriver"; system="x86_64-linux"; builder="/bin/sh"; __contentAddressed=true; outputHashAlgo="sha256"; outputHashMode="recursive"; }"#]))?.stdout)?.trim().to_owned();
+    let mut manifest = native::dump(&source, &[out.clone(), drv.clone()])?;
+    manifest.paths.get_mut(&out).unwrap()["deriver"] = json!(drv);
+    for path in manifest.paths.keys() {
+        let relative = path.trim_start_matches('/');
+        let destination = target.join(relative);
+        fs::create_dir_all(destination.parent().unwrap())?;
+        fs::copy(source.join(relative), destination)?;
+    }
+    native::register(&target, &manifest)?;
+    let static_derivers = output(Command::new("nix-store").arg("--store").arg(&target).args([
+        "--query",
+        "--valid-derivers",
+        &out,
+    ]))?;
+    ensure!(
+        static_derivers.stdout.is_empty(),
+        "fixture unexpectedly has a static output record"
+    );
+    std::os::unix::fs::symlink(&out, target.join("nix/var/nix/gcroots/live-ca-output"))?;
+    let snapshot: distributed_nix::gc::Snapshot =
+        serde_json::from_value(native::online_snapshot(&target)?)?;
+    let plan = distributed_nix::gc::plan("00000000000000000000000000000001", &vec![snapshot; 4])?;
+    ensure!(
+        plan.keep.contains(&drv),
+        "live CA output lost its recorded deriver"
+    );
+    ensure!(plan.workers.iter().all(|paths| !paths.contains(&drv)) && !plan.origin.contains(&drv));
+    Ok(())
+}

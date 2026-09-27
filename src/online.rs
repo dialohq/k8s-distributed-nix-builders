@@ -117,9 +117,12 @@ pub fn guard(base: &Path, paths: &[String], wait: bool) -> Result<Lock> {
     }
 }
 
-pub fn pin(base: &Path, root: &Path, name: &str, paths: &[String]) -> Result<()> {
+fn try_pin(base: &Path, root: &Path, name: &str, paths: &[String]) -> Result<bool> {
     ensure!(valid_group(name), "invalid root group");
-    let _gate = guard(base, paths, true)?;
+    let _gate = Lock::acquire(&base.join("online-roots.lock"), true)?;
+    if retiring(base, paths)? {
+        return Ok(false);
+    }
     let directory = root.join(ROOTS).join(name);
     ensure!(directory.is_dir(), "root group disappeared");
     for path in paths {
@@ -134,6 +137,13 @@ pub fn pin(base: &Path, root: &Path, name: &str, paths: &[String]) -> Result<()>
             }
             Err(error) => return Err(error.into()),
         }
+    }
+    Ok(true)
+}
+
+pub fn pin(base: &Path, root: &Path, name: &str, paths: &[String]) -> Result<()> {
+    while !try_pin(base, root, name, paths)? {
+        std::thread::sleep(Duration::from_millis(50));
     }
     Ok(())
 }
@@ -151,15 +161,17 @@ pub fn pin_runtime(paths: &[String]) -> Result<Value> {
         .cloned()
         .collect();
     if !missing.is_empty() {
-        pin(
+        if !try_pin(
             Path::new("/run/distributed-nix"),
             Path::new("/"),
             name,
             &missing,
-        )?;
+        )? {
+            return Ok(json!(false));
+        }
         pinned.extend(missing);
     }
-    Ok(Value::Null)
+    Ok(json!(true))
 }
 
 impl Node {
@@ -534,6 +546,11 @@ impl Node {
         }
         let result = json!({"id":id,"finished":true});
         durable(&complete, &result)?;
+        let retired = epoch.join("old-admissions");
+        if retired.exists() {
+            fs::remove_dir_all(retired)?;
+            syncdir(&epoch)?;
+        }
         remove_file(&self.base.join("retiring"))?;
         remove_file(&self.base.join("online-gc.json"))?;
         Ok(result)

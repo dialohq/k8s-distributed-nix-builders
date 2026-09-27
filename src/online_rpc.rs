@@ -153,7 +153,19 @@ impl Service {
         })
         .await
         .map_err(|e| Status::internal(e.to_string()))?
-        .map_err(|e| Status::failed_precondition(format!("{e:#}")))?;
+        .map_err(|e| {
+            let text = format!("{e:#}");
+            let tail: String = text
+                .chars()
+                .rev()
+                .take(4096)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect();
+            eprintln!("online GC {op}: {tail}");
+            Status::failed_precondition(tail)
+        })?;
         Ok(Response::new(GcReply {
             json: serde_json::to_vec(&result).map_err(|e| Status::internal(e.to_string()))?,
         }))

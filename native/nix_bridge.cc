@@ -1,6 +1,8 @@
 #include "nix_bridge.h"
 #include "nix/main/shared.hh"
 #include "nix/util/callback.hh"
+#include "nix/util/signals.hh"
+#include <chrono>
 #include "nix/store/local-store.hh"
 #include "nix/store/gc-store.hh"
 #include "nix/store/path-info.hh"
@@ -37,6 +39,15 @@ nlohmann::json runtime(uint32_t operation, const nlohmann::json & request)
     return nlohmann::json::parse(text);
 }
 
+void pinClientPaths(const std::vector<std::string> & paths)
+{
+    while (true) {
+        nix::checkInterrupt();
+        if (runtime(5, paths).get<bool>()) return;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+}
+
 // Nix still owns the wire protocol, evaluator-facing API, build engine and SQL.
 // Every registration (build, source import, copy, substitution) gets an outbox
 // record BEFORE the native transaction. Invalid records are harmless and retryable.
@@ -48,21 +59,21 @@ public:
 
     bool isValidPathUncached(const nix::StorePath & path) override
     {
-        runtime(5, std::vector<std::string>{printStorePath(path)});
+        pinClientPaths(std::vector<std::string>{printStorePath(path)});
         return nix::LocalStore::isValidPathUncached(path);
     }
 
     void queryPathInfoUncached(const nix::StorePath & path,
         nix::Callback<std::shared_ptr<const nix::ValidPathInfo>> callback) noexcept override
     {
-        try { runtime(5, std::vector<std::string>{printStorePath(path)}); }
+        try { pinClientPaths(std::vector<std::string>{printStorePath(path)}); }
         catch (...) { callback.rethrow(); return; }
         nix::LocalStore::queryPathInfoUncached(path, std::move(callback));
     }
 
     void addTempRoot(const nix::StorePath & path) override
     {
-        runtime(5, std::vector<std::string>{printStorePath(path)});
+        pinClientPaths(std::vector<std::string>{printStorePath(path)});
         nix::LocalStore::addTempRoot(path);
     }
 
@@ -74,7 +85,7 @@ public:
             for (const auto & ref : info.references) pins.push_back(printStorePath(ref));
             if (info.deriver) pins.push_back(printStorePath(*info.deriver));
         }
-        runtime(5, pins);
+        pinClientPaths(pins);
         std::vector<std::string> paths;
         for (const auto & [path, info] : infos)
             if (!isValidPath(path)) paths.push_back(printStorePath(path));
@@ -87,7 +98,7 @@ public:
     {
         std::vector<std::string> pins{printStorePath(info.outPath)};
         for (const auto & [id, path] : info.dependentRealisations) pins.push_back(printStorePath(path));
-        runtime(5, pins);
+        pinClientPaths(pins);
         auto old = queryRealisation(info.id);
         runtime(4, nlohmann::json(old ? nix::Realisation{*old, info.id} : info));
         nix::LocalStore::registerDrvOutput(info);
@@ -343,6 +354,11 @@ nlohmann::json invoke(uint32_t op, const char *uri, const nlohmann::json &input)
             auto info = store->queryPathInfo(p);
             auto &edges = graph[name];
             for (const auto &ref : info->references) edges.insert(store->printStorePath(ref));
+            // CA outputs need not appear in the static DerivationOutputs table.
+            if (info->deriver && store->isValidPath(*info->deriver)) {
+                auto d = store->printStorePath(*info->deriver);
+                edges.insert(d); graph[d].insert(name);
+            }
             // Conservatively retain valid derivations and their outputs together.
             // This also covers either native keep-derivations/keep-outputs setting.
             for (const auto &drv : store->queryValidDerivers(p)) {
