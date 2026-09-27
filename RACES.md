@@ -53,6 +53,13 @@ not elapsed time, grants access. SQLite's busy timeout bounds contention errors;
 transactions and fences provide atomicity. `Instant` measurements are reporting
 only. No timer authorizes shared deletion or expires a retirement fence.
 
+Shared paths are immutable while admitted. NFS may cache their attributes for
+600 seconds, but admission does not wait for that timer: it forces fresh metadata
+with `statx(AT_STATX_FORCE_SYNC)` on both the store directory and source path before
+binding. The Kubernetes test primes a positive lookup, replaces the directory on
+the server, then immediately admits and verifies its new NAR in an isolated native
+store, ten times. No sleep or cache-expiry assertion is involved.
+
 Kernel NFS lease/grace periods govern the external NFS protocol, not Nix GC
 eligibility. Client recovery records persist on the store PVC through `nfsdcld`.
 The Rust pod supervisor owns and reaps each child, handles SIGTERM/SIGINT, and

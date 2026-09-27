@@ -243,7 +243,7 @@ pub fn mount_nfs_worker() -> Result<()> {
         .context("NFS Service has no address")?
         .ip();
     let options = format!(
-        "vers=4.1,proto=tcp,port=2049,addr={address},hard,timeo=10,retrans=2,lookupcache=positive,actimeo=1,nosharecache"
+        "vers=4.1,proto=tcp,port=2049,addr={address},hard,timeo=10,retrans=2,lookupcache=positive,actimeo=600,nosharecache"
     );
     crate::linux::mount(
         Some(Path::new(&format!("{host}:/"))),
