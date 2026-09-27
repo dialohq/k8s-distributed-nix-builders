@@ -12,6 +12,11 @@
     packages.${system} = {
       default = package;
       distributed-nix = package;
+      deploymentTools = pkgs.buildEnv {
+        name = "distributed-nix-deployment-tools";
+        paths = [pkgs.kubernetes-helm pkgs.kubectl pkgs.kind];
+      };
+      image = import ./deploy/image {inherit pkgs package;};
     };
     checks.${system}.distributed-nix = package;
     devShells.${system}.default = pkgs.mkShell {

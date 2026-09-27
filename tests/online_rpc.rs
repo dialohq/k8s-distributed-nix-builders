@@ -6,7 +6,7 @@ use distributed_nix::{
     util::durable,
 };
 use serde_json::json;
-use std::{fs, path::PathBuf};
+use std::fs;
 use tonic::{Code, Request};
 
 #[tokio::test]
@@ -23,20 +23,17 @@ async fn authenticated_rpc_rejects_unknown_pods_and_conflicting_epochs() -> Resu
     durable(&base.join("ready"), &json!(true))?;
     let token = "online-gc-test-012345678901234567890123456789";
     fs::write(base.join("token"), token)?;
-    let cri = base.join("cri.json");
-    fs::write(&cri, r#"{"items":[]}"#)?;
-    let cat: PathBuf = std::env::split_paths(&std::env::var_os("PATH").unwrap())
-        .map(|p| p.join("cat"))
-        .find(|p| p.is_file())
-        .unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     let config = Config {
-        nodes: vec![address, "127.0.0.1:1".parse()?, "127.0.0.1:2".parse()?],
+        nodes: vec![
+            address.to_string(),
+            "127.0.0.1:1".into(),
+            "127.0.0.1:2".into(),
+        ],
         index: 0,
         token_file: base.join("token"),
-        cri_command: vec![cat.to_str().unwrap().into(), cri.to_str().unwrap().into()],
-        namespace: "arc-runners".into(),
+        pod_uid: Some("unknown-pod".into()),
     };
     let service = Service::new(node.clone(), config.clone())?;
     let (stop, stopping) = tokio::sync::oneshot::channel();
@@ -61,11 +58,6 @@ async fn authenticated_rpc_rejects_unknown_pods_and_conflicting_epochs() -> Resu
             .insert("authorization", format!("Bearer {token}").parse().unwrap());
         request
     };
-    client.preflight(authorized(request())).await?;
-    fs::write(
-        &cri,
-        r#"{"items":[{"metadata":{"namespace":"arc-runners","uid":"unknown-pod"}}]}"#,
-    )?;
     ensure!(
         client
             .preflight(authorized(request()))
@@ -139,24 +131,18 @@ async fn coordinator_rejects_duplicate_worker_identity_before_marking() -> Resul
         base.join("token"),
         "online-gc-test-012345678901234567890123456789",
     )?;
-    fs::write(base.join("cri.json"), r#"{"items":[]}"#)?;
-    let cat = std::env::split_paths(&std::env::var_os("PATH").unwrap())
-        .map(|p| p.join("cat"))
-        .find(|p| p.is_file())
-        .unwrap();
     let mut listeners = Vec::new();
     for _ in 0..3 {
         listeners.push(tokio::net::TcpListener::bind("127.0.0.1:0").await?);
     }
     let config = Config {
-        nodes: listeners.iter().map(|l| l.local_addr().unwrap()).collect(),
+        nodes: listeners
+            .iter()
+            .map(|l| l.local_addr().unwrap().to_string())
+            .collect(),
         index: 0,
         token_file: base.join("token"),
-        cri_command: vec![
-            cat.to_str().unwrap().into(),
-            base.join("cri.json").to_str().unwrap().into(),
-        ],
-        namespace: "arc-runners".into(),
+        pod_uid: None,
     };
     let mut tasks = Vec::new();
     for listener in listeners {

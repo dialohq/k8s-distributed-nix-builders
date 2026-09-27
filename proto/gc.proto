@@ -12,3 +12,25 @@ service OnlineGC {
 }
 message GCRequest { string epoch = 1; bool origin = 2; bytes plan_json = 3; }
 message GCReply { bytes json = 1; }
+
+// Closed administrative operations. No command execution or arbitrary file access.
+service StoreTransport {
+  rpc Operate(StoreRequest) returns (StoreReply);
+  rpc Lease(Empty) returns (stream Empty);
+  rpc Transfer(stream Frame) returns (stream Frame);
+}
+message Empty {}
+message Frame { bytes data = 1; }
+message StoreRequest {
+  enum Operation {
+    RECEIVE = 0; DUMP = 1; DUMP_ORIGIN = 2; ADMIT = 3;
+    RESERVE = 4; COMMIT = 5; CANONICAL = 6; OUTBOX = 7;
+    ACKNOWLEDGE = 8; CA_OUTBOX = 9; CA_ACKNOWLEDGE = 10;
+    CONFLICTS = 11; PIN = 12; PUBLICATION = 13; INFO = 14;
+  }
+  Operation operation = 1;
+  repeated string paths = 2;
+  string batch = 3;
+  bytes manifest = 4;
+}
+message StoreReply { bytes json = 1; }

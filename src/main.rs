@@ -10,20 +10,20 @@ fn execute() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() || args[0] == "--help" {
         println!(
-            "distributed-nix: native Nix + node-local metadata + shared packages\n\nConfiguration: /etc/distributed-nix/cluster.json (override: DISTRIBUTED_NIX_CONFIG)\nCommands: publish NODE PATH..., reconcile ID, recover NODE, gc [--dry-run | --if-needed]\nInternal: node OP ARGS..., pivot ROOT COMMAND ARGS..."
+            "distributed-nix: native Nix, private metadata, shared packages\n\nConfiguration: DISTRIBUTED_NIX_ONLINE_CONFIG (default /etc/distributed-nix/online-gc.json)\nCommands: serve, publisher, status, bootstrap, publish PARTICIPANT PATH..., reconcile ID, gc [--dry-run | --if-needed]\nInternal: node OP ARGS..., pivot ROOT COMMAND ARGS..."
         );
         return Ok(());
     }
-    if matches!(args[0].as_str(), "gc" | "online-gc-server") {
+    if matches!(args[0].as_str(), "gc" | "serve") {
         let file = std::env::var("DISTRIBUTED_NIX_ONLINE_CONFIG")
             .unwrap_or_else(|_| "/etc/distributed-nix/online-gc.json".into());
         let config: distributed_nix::online_rpc::Config =
             serde_json::from_slice(&std::fs::read(file)?)?;
         return tokio::runtime::Runtime::new()?.block_on(async {
-            if args[0] == "online-gc-server" {
+            if args[0] == "serve" {
                 let service =
                     distributed_nix::online_rpc::Service::new(Node::default(), config.clone())?;
-                let listener = tokio::net::TcpListener::bind(config.nodes[config.index]).await?;
+                let listener = tokio::net::TcpListener::bind("0.0.0.0:9840").await?;
                 distributed_nix::online_rpc::serve(listener, service, async {
                     let _ = tokio::signal::ctrl_c().await;
                 })
@@ -37,7 +37,7 @@ fn execute() -> Result<()> {
                 );
                 let threshold = if args.get(1).is_some_and(|s| s == "--if-needed") {
                     Some(
-                        std::env::var("CIBOX_GC_MIN_FREE_PERCENT")
+                        std::env::var("DISTRIBUTED_NIX_GC_MIN_FREE_PERCENT")
                             .unwrap_or_else(|_| "20".into())
                             .parse()?,
                     )
@@ -55,6 +55,9 @@ fn execute() -> Result<()> {
                 Ok(())
             }
         });
+    }
+    if args[0] == "native-transfer" {
+        return distributed_nix::native::serve_transfer(std::path::Path::new(arg(&args, 1)?));
     }
     if args[0] == "native-gc" {
         distributed_nix::node::enter_chroot(arg(&args, 1)?)?;
@@ -86,9 +89,10 @@ fn execute() -> Result<()> {
         let c = Cluster::new()?;
         match args[0].as_str() {
             "publisher" => c.publisher()?,
+            "status" => c.status()?,
+            "bootstrap" => c.bootstrap(&Node::default())?,
             "publish" => c.publish(arg(&args, 1)?.parse()?, &args[2..])?,
             "reconcile" => c.reconcile(arg(&args, 1)?)?,
-            "recover" => c.call_json(arg(&args, 1)?.parse()?, &["recover".into()])?,
             _ => bail!("unknown command; use --help"),
         }
     };

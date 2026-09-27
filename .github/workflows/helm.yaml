@@ -1,0 +1,41 @@
+name: Helm Kubernetes E2E
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  kind:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: nixbuild/nix-quick-install-action@2c9db80fb984ceb1bcaa77cdda3fdf8cfba92035
+      - name: Build image and tools
+        run: |
+          nix build .#image --out-link image -L
+          nix build .#deploymentTools --out-link deployment-tools
+          echo "$PWD/deployment-tools/bin" >> "$GITHUB_PATH"
+      - name: Start ordinary Kubernetes
+        run: |
+          sudo modprobe nfs
+          sudo mkdir -p /mnt/distributed-nix-kind
+          kind create cluster --config deploy/kind.yaml --wait 120s
+          kind load image-archive "$(readlink -f image)"
+      - name: Install and test Helm release
+        run: |
+          helm lint deploy/chart
+          helm upgrade --install e2e ./deploy/chart --namespace nix-builders --create-namespace \
+            --set store.resources.requests.cpu=100m --set builders.resources.requests.cpu=100m \
+            --set store.resources.requests.memory=256Mi --set builders.resources.requests.memory=256Mi \
+            --set store.storage=10Gi --set builders.storage=10Gi \
+            --set gc.intervalSeconds=86400 --wait --timeout 15m
+          helm test e2e --namespace nix-builders --logs
+          python3 deploy/e2e.py --namespace nix-builders --release e2e
+      - name: Diagnose failure
+        if: failure()
+        run: |
+          kubectl get pods,pvc,events -n nix-builders -o wide
+          for pod in $(kubectl get pods -n nix-builders -o name); do
+            kubectl logs -n nix-builders "$pod" --all-containers --tail=100 || true
+          done

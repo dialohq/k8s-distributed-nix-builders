@@ -1,0 +1,12 @@
+The store serves NFS and authenticated gRPC entirely inside the cluster.
+Builders keep native Nix metadata in their own PVCs.
+
+Use standard Nix tooling inside a builder:
+  kubectl exec -n {{ .Release.Namespace }} -it {{ include "dn.name" . }}-builder-0 -- nix --version
+
+Run online GC:
+  kubectl exec -n {{ .Release.Namespace }} {{ include "dn.name" . }}-store-0 -- distributed-nix gc
+
+PVCs survive uninstall. Never share a metadata PVC between pool members or force
+replace a pod whose old process may still be running. Membership is persisted;
+changing the replica count requires an explicit retirement protocol, not HPA.

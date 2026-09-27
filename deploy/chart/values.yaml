@@ -1,0 +1,33 @@
+image:
+  repository: ghcr.io/dialohq/k8s-distributed-nix-builders
+  tag: portable
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+clusterDomain: cluster.local
+auth:
+  # Recommended for GitOps. Secret must contain a 32–256 byte `token` key.
+  existingSecret: ""
+store:
+  storageClass: ""
+  storage: 100Gi
+  resources:
+    requests:
+      cpu: "1"
+      memory: 1Gi
+builders:
+  # Stable pool membership: select at installation; do not shrink existing PVCs
+  # out of the pool. An unavailable participant intentionally prevents GC.
+  replicas: 3
+  storageClass: ""
+  storage: 50Gi
+  resources:
+    requests:
+      cpu: "1"
+      memory: 1Gi
+gc:
+  intervalSeconds: 3600
+  minFreePercent: 20
+nodeSelector:
+  kubernetes.io/os: linux
+  kubernetes.io/arch: amd64
+tolerations: []

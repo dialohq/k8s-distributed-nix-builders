@@ -1,0 +1,6 @@
+apiVersion: v2
+name: k8s-distributed-nix-builders
+description: Shared Nix packages, pod-local SQLite metadata, and online GC on Kubernetes
+type: application
+version: 0.3.0
+appVersion: "0.3.0"

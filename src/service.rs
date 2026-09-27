@@ -309,11 +309,12 @@ impl Cluster {
             .collect();
         if !ready.is_empty() {
             let subset = manifest.realisation_closure(&ready)?;
-            let publication = self.publish_manifest(node, &subset, &[0, 1, 2])?;
+            let publication =
+                self.publish_manifest(node, &subset, &(0..self.len()).collect::<Vec<_>>())?;
             for batch in ready.chunks(128) {
                 let mut args = vec!["ca-acknowledge".into()];
                 args.extend_from_slice(batch);
-                self.call(node, &args)?;
+                self.call_json(node, &args)?;
             }
             rows.push(publication);
         }
@@ -322,7 +323,7 @@ impl Cluster {
 
     fn publish_paths_pending(&self) -> Result<Vec<Value>> {
         let mut rows = Vec::new();
-        for n in 0..3 {
+        for n in 0..self.len() {
             let result = (|| -> Result<Value> {
                 let paths: Vec<String> =
                     serde_json::from_value(self.call_json(n, &["outbox".into()])?)?;
@@ -333,7 +334,7 @@ impl Cluster {
                 let publication = self.publish(n, &batch)?;
                 let mut args = vec!["acknowledge".into()];
                 args.extend(batch);
-                self.call(n, &args)?;
+                self.call_json(n, &args)?;
                 Ok(publication)
             })();
             rows.push(match result {
@@ -346,7 +347,7 @@ impl Cluster {
 
     pub fn publish_pending(&self) -> Result<Value> {
         let mut rows = self.publish_paths_pending()?;
-        for node in 0..3 {
+        for node in 0..self.len() {
             match self.publish_ca_pending(node) {
                 Ok(publications) => rows.extend(publications),
                 Err(error) => rows.push(json!({"node":node,"error":format!("{error:#}")})),

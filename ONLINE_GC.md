@@ -1,45 +1,42 @@
 # Online shared-store collection
 
-`distributed-nix gc` runs on the origin node. `--dry-run` reports a plan;
-`--if-needed` collects only under disk pressure, or resumes an interrupted epoch.
-The ARC maintenance wrapper's `gc` and `auto-gc` commands use this protocol.
-Runners remain scheduled and native Nix builds continue.
+Run `distributed-nix gc` inside the store pod. `--dry-run` reports a plan;
+`--if-needed` collects under disk pressure or resumes an interrupted epoch.
+The store container runs this check periodically. Builds continue during GC.
 
 Each native daemon connection pins paths before reading their metadata or
-registering them. Pod connections share permanent Nix roots keyed by the pod
-UID; the builder must receive `CIBOX_POD_UID` through the downward API. Pins last
-until the CRI sandbox disappears **and** all connection/listener leases close.
-This covers shells that outlive their Nix connection and private PID namespaces.
-Collection conservatively retains everything acquired during a pod's lifetime.
+registering them. Connections share permanent Nix roots keyed by
+`DISTRIBUTED_NIX_POD_UID`, supplied through the downward API. A participant owns
+one builder pod and its private PVC. Pins survive until that pod is replaced
+and all old connection/listener leases close. This covers shells that outlive
+their Nix connection and conservatively retains everything acquired during a
+pod's lifetime; it does not reclaim those roots between jobs in the same pod.
 
 The coordinator pauses publication, reads the union of native roots and
 reference graphs, and installs durable retirement markers for candidate paths
-on every node. It then reads roots again. Paths acquired between the first mark
-and the barrier remain live. A request for a retiring path waits until collection
-finishes, then checks native metadata again; unrelated requests continue.
+on every participant. It reads roots again: paths acquired between the first
+mark and the barrier remain live. Requests for retiring paths wait until
+collection finishes, then recheck native metadata; unrelated requests continue.
 
-Workers checkpoint admission metadata, retaining new admissions as well as old
-live paths, remove dead mounts, and ask **native Nix** to delete the selected
-paths with liveness enforcement enabled. Only after all three durable worker
-acknowledgements can the origin delete shared files. No independent collector
-may delete origin files. Synthetic sharing pins are excluded from marking;
-ordinary roots, client pins, pending publication, and CA dependencies count.
+Workers checkpoint admission metadata, retaining new admissions and old live
+paths, remove dead mounts, and ask native Nix to delete the selected paths with
+liveness enforcement enabled. Only after every configured participant has
+acknowledged can the origin delete shared files. No independent collector may
+delete origin files. Synthetic sharing pins are excluded from marking; ordinary
+roots, client pins, pending publication, and CA dependencies count.
 
-The coordinator and node services use authenticated gRPC on a private network.
-`/etc/distributed-nix/online-gc.json` contains three `IP:port` endpoints, the local
-`index`, `token_file`, an absolute `cri_command` array, and the builder `namespace`.
-The token must contain 32–256 bytes. Bind/firewall the service to the trusted
-private network; transport encryption is not implemented. The endpoint exposes
-only typed collection operations. Existing publication transport is unchanged.
+Publication and GC use authenticated gRPC. The runtime configuration contains
+`nodes` (ordered DNS host:port endpoints), the local `index`, `token_file`, and
+optional `pod_uid`. Index zero is the store. Membership is persisted on each
+PVC; a changed list is rejected. Select the builder count at installation;
+resizing or retiring a participant is not implemented. No Kubernetes API or CRI
+socket is needed. Transport encryption is not implemented; use trusted networks.
 
-Epochs and barriers survive crashes. Rerun the same command to resume; never
-remove a retirement marker manually. Missing nodes prevent origin deletion.
-After interruption, affected path requests can remain blocked until recovery,
-but unrelated builds can proceed. There is no timed expiry of safety state.
-GC has one mode: online collection. Drained maintenance is only for upgrades.
+Epochs and barriers survive crashes. Rerun GC to resume; never remove a marker
+manually. Missing participants prevent shared deletion. After interruption,
+affected path requests can remain blocked until recovery while unrelated builds
+proceed. There is no timed expiry of safety state. GC has one mode: online.
 
-Local tests cover root/lease lifetime, late remote roots, retirement waits,
-immutable plans, admission checkpoint recovery, authentication, and native
-liveness. Deployment tests additionally exercise active builds, new requests,
-pod deletion, coordinator interruption, and an unavailable peer. The design
-assumes trusted builders, fixed three-node membership, and immutable store paths.
+The design assumes immutable store paths, trusted builders, and at most one
+active pod owning each metadata PVC. Never bypass Kubernetes/storage fencing by
+force-deleting an unreachable pod and starting a second writer.

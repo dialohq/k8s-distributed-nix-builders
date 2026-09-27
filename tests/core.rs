@@ -131,36 +131,6 @@ fn shell_transport_preserves_literal_metacharacters() {
 }
 
 #[test]
-fn cluster_config_rejects_ambiguous_or_public_membership() {
-    use distributed_nix::cluster::ClusterConfig;
-    let valid = json!({
-        "nodes": ["10.77.0.10", "10.77.0.11", "10.77.0.12"],
-        "identity_file": "/run/agenix/distributed-nix-ssh",
-        "known_hosts_file": "/etc/distributed-nix/known_hosts"
-    });
-    let config: ClusterConfig = serde_json::from_value(valid.clone()).unwrap();
-    config.validate().unwrap();
-    for (key, value) in [
-        ("nodes", json!(["10.77.0.10", "10.77.0.10", "10.77.0.12"])),
-        ("nodes", json!(["10.77.0.10", "8.8.8.8", "10.77.0.12"])),
-        ("identity_file", json!("relative-key")),
-        ("known_hosts_file", json!("relative-hosts")),
-    ] {
-        let mut invalid = valid.clone();
-        invalid[key] = value;
-        assert!(
-            serde_json::from_value::<ClusterConfig>(invalid)
-                .unwrap()
-                .validate()
-                .is_err()
-        );
-    }
-    let mut unknown = valid;
-    unknown["ignored_typo"] = json!(true);
-    assert!(serde_json::from_value::<ClusterConfig>(unknown).is_err());
-}
-
-#[test]
 fn durable_never_reuses_or_removes_another_process_temporary_file() {
     let dir = tempfile::tempdir().unwrap();
     for sequence in 0..200 {

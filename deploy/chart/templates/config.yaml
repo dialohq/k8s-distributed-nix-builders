@@ -1,0 +1,30 @@
+{{- if lt (int .Values.builders.replicas) 1 }}{{ fail "builders.replicas must be at least 1" }}{{ end }}
+{{- if or (lt (int .Values.gc.minFreePercent) 1) (gt (int .Values.gc.minFreePercent) 99) }}{{ fail "gc.minFreePercent must be 1–99" }}{{ end }}
+{{- if lt (int .Values.gc.intervalSeconds) 1 }}{{ fail "gc.intervalSeconds must be positive" }}{{ end }}
+{{- $name := include "dn.name" . }}
+{{- $domain := printf "%s.svc.%s" .Release.Namespace .Values.clusterDomain }}
+{{- $members := list (printf "%s-store.%s:9840" $name $domain) }}
+{{- range $i := until (int .Values.builders.replicas) }}
+{{- $members = append $members (printf "%s-builder-%d.%s-builders.%s:9840" $name $i $name $domain) }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "dn.labels" . | nindent 4 }}
+data:
+  participants.json: {{ dict "nodes" $members "token_file" "/run/secrets/controller/token" | toJson | quote }}
+{{- if not .Values.auth.existingSecret }}
+---
+{{- $previous := lookup "v1" "Secret" .Release.Namespace $name }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "dn.labels" . | nindent 4 }}
+type: Opaque
+data:
+  token: {{ if $previous }}{{ index $previous.data "token" | quote }}{{ else }}{{ randAlphaNum 64 | b64enc | quote }}{{ end }}
+{{- end }}

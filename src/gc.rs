@@ -33,7 +33,7 @@ pub struct Plan {
 impl Plan {
     pub fn validate(&self) -> Result<()> {
         valid_id(&self.id)?;
-        ensure!(self.workers.len() == 3, "GC requires exactly three workers");
+        ensure!(!self.workers.is_empty(), "GC requires participants");
         for set in self.workers.iter().chain([&self.origin]) {
             ensure!(
                 set.is_disjoint(&self.keep),
@@ -52,7 +52,7 @@ impl Plan {
     }
 }
 pub fn plan(id: &str, snapshots: &[Snapshot]) -> Result<Plan> {
-    ensure!(snapshots.len() == 4, "missing GC snapshot");
+    ensure!(snapshots.len() >= 2, "missing GC snapshots");
     let mut graph: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut keep = BTreeSet::new();
     for snap in snapshots {
@@ -95,8 +95,8 @@ pub fn plan(id: &str, snapshots: &[Snapshot]) -> Result<Plan> {
     let p = Plan {
         id: id.into(),
         keep,
-        workers: dead[..3].to_vec(),
-        origin: dead[3].clone(),
+        workers: dead[..dead.len() - 1].to_vec(),
+        origin: dead.last().unwrap().clone(),
     };
     p.validate()?;
     Ok(p)
