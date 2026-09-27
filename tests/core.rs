@@ -106,9 +106,11 @@ fn native_flock_blocks_competitor_and_releases_on_drop() {
     let o = c.arg("-n").arg(&p).arg("true").status().unwrap();
     assert!(!o.success());
     drop(l);
+    // A concurrent test may fork while the FD is open. Its inherited CLOEXEC
+    // copy is released at exec; verify bounded release, not zero-latency release.
     assert!(
         Command::new("flock")
-            .arg("-n")
+            .args(["-w", "5"])
             .arg(&p)
             .arg("true")
             .status()
@@ -120,7 +122,7 @@ fn native_flock_blocks_competitor_and_releases_on_drop() {
     drop((a, b));
 }
 #[test]
-fn shell_transport_preserves_literal_metacharacters() {
+fn shell_quoting_preserves_literal_metacharacters() {
     let s = "a ' b\n$(touch /never-run) `false` $HOME";
     let o = Command::new("sh")
         .args(["-c", &format!("printf %s {}", sh(s))])
