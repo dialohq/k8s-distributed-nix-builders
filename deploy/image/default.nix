@@ -69,6 +69,10 @@ in pkgs.dockerTools.buildLayeredImage {
     chmod 1777 tmp
   '';
   config = {
+    Labels = {
+      "org.opencontainers.image.source" = "https://github.com/dialohq/k8s-distributed-nix-builders";
+      "org.opencontainers.image.version" = "0.3.0";
+    };
     Entrypoint = ["${pkgs.tini}/bin/tini" "-g" "--" "/bin/distributed-nix-entrypoint"];
     Env = ["PATH=${pkgs.lib.makeBinPath runtime}" "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt" "NIX_SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt" "NIX_CONFIG=experimental-features = nix-command flakes ca-derivations" "DISTRIBUTED_NIX_ONLINE_CONFIG=/run/distributed-nix-config.json"];
     WorkingDir = "/work";
