@@ -264,3 +264,7 @@ pub fn serve_store(root: &Path) -> Result<()> {
     }
     Ok(())
 }
+
+pub fn online_snapshot(root: &Path) -> Result<Value> {
+    call(14, root, b"null")
+}

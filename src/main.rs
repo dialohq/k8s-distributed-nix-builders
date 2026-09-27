@@ -14,11 +14,57 @@ fn execute() -> Result<()> {
         );
         return Ok(());
     }
+    if (matches!(args[0].as_str(), "online-gc" | "online-gc-server")
+        || (args[0] == "gc"
+            && std::path::Path::new("/etc/distributed-nix/online-gc.json").exists()))
+    {
+        let file = std::env::var("DISTRIBUTED_NIX_ONLINE_CONFIG")
+            .unwrap_or_else(|_| "/etc/distributed-nix/online-gc.json".into());
+        let config: distributed_nix::online_rpc::Config =
+            serde_json::from_slice(&std::fs::read(file)?)?;
+        return tokio::runtime::Runtime::new()?.block_on(async {
+            if args[0] == "online-gc-server" {
+                let service =
+                    distributed_nix::online_rpc::Service::new(Node::default(), config.clone())?;
+                let listener = tokio::net::TcpListener::bind(config.nodes[config.index]).await?;
+                distributed_nix::online_rpc::serve(listener, service, async {
+                    let _ = tokio::signal::ctrl_c().await;
+                })
+                .await
+            } else {
+                anyhow::ensure!(
+                    args.len() == 1
+                        || (args.len() == 2
+                            && matches!(args[1].as_str(), "--dry-run" | "--if-needed")),
+                    "usage: online-gc [--dry-run | --if-needed]"
+                );
+                let threshold = if args.get(1).is_some_and(|s| s == "--if-needed") {
+                    Some(
+                        std::env::var("CIBOX_GC_MIN_FREE_PERCENT")
+                            .unwrap_or_else(|_| "20".into())
+                            .parse()?,
+                    )
+                } else {
+                    None
+                };
+                let result = distributed_nix::online_rpc::collect(
+                    &Node::default(),
+                    &config,
+                    args.get(1).is_some_and(|s| s == "--dry-run"),
+                    threshold,
+                )
+                .await?;
+                println!("{}", serde_json::to_string_pretty(&result)?);
+                Ok(())
+            }
+        });
+    }
     if args[0] == "native-gc" {
         distributed_nix::node::enter_chroot(arg(&args, 1)?)?;
         let root = std::path::Path::new("local?path-info-cache-size=0");
         let v = match arg(&args, 2)? {
             "snapshot" => distributed_nix::native::gc_snapshot(root)?,
+            "online-snapshot" => distributed_nix::native::online_snapshot(root)?,
             "delete" => distributed_nix::native::gc_delete(
                 root,
                 &serde_json::from_slice(&distributed_nix::util::read_stdin()?)?,

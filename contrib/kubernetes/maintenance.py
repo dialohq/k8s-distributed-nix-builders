@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Drain ARC before distributed-nix GC; retain the drain after interrupted collection."""
+"""Online shared-store GC and explicit ARC maintenance for upgrades."""
 import fcntl
 import json
 import os
@@ -106,34 +106,9 @@ def resume(state):
 
 def automatic_gc():
     if STATE.exists():
-        state = json.loads(STATE.read_text())
-        if not state.get("automatic", False):
-            print("Manual maintenance is active; automatic GC skipped", flush=True)
-            return
-    else:
-        threshold = int(os.environ.get("CIBOX_GC_MIN_FREE_PERCENT", "20"))
-        if not 1 <= threshold <= 100:
-            raise ValueError("CIBOX_GC_MIN_FREE_PERCENT must be between 1 and 100")
-        config = json.loads(Path("/etc/distributed-nix/cluster.json").read_text())
-        pressure = False
-        for host in config["nodes"]:
-            size, available = map(int, remote(host, "df -B1 --output=size,avail /srv").splitlines()[-1].split())
-            pressure |= available * 100 < size * threshold
-        if not pressure:
-            print("No shared-store disk pressure; automatic GC skipped", flush=True)
-            return
-    try:
-        state = drain(automatic=True, seconds=10)
-    except TimeoutError:
-        # No collection has started. Resume still checks every node for a GC epoch.
-        resume(json.loads(STATE.read_text()))
-        print("Runner arrived during drain; automatic GC deferred", flush=True)
+        print("Manual maintenance is active; automatic GC skipped", flush=True)
         return
-    state["phase"] = "collecting"
-    durable(state)
-    print(run(["distributed-nix", "gc-maintenance"]), flush=True)
-    gc_git_caches()
-    resume(state)
+    print(run(["distributed-nix", "online-gc", "--if-needed"]), flush=True)
 
 
 def gc_git_caches():
@@ -147,8 +122,8 @@ def main():
         raise PermissionError("Run on cibox-0 as root")
     os.environ["KUBECONFIG"] = "/etc/rancher/k3s/k3s.yaml"
     command = sys.argv[1:]
-    if command not in (["drain"], ["resume"], ["gc"], ["gc", "--dry-run"], ["auto-gc"]):
-        raise ValueError("Usage: cibox-maintenance drain | resume | gc [--dry-run] | auto-gc")
+    if command not in (["drain"], ["resume"], ["gc"], ["gc", "--dry-run"], ["gc-offline"], ["gc-offline", "--dry-run"], ["auto-gc"]):
+        raise ValueError("Usage: cibox-maintenance drain | resume | gc [--dry-run] | gc-offline [--dry-run] | auto-gc")
     with (BASE / "arc-maintenance.lock").open("w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         if command == ["auto-gc"]:
@@ -157,8 +132,11 @@ def main():
         if command == ["resume"]:
             resume(json.loads(STATE.read_text()))
             return
-        state = drain()
         if command[0] == "gc":
+            print(run(["distributed-nix", "online-gc", *command[1:]]), flush=True)
+            return
+        state = drain()
+        if command[0] == "gc-offline":
             result = run(["distributed-nix", "gc-maintenance", *command[1:]])
             print(result, flush=True)
             if "--dry-run" not in command:

@@ -7,6 +7,9 @@ pub mod node;
 pub mod util;
 
 pub mod gc;
+pub mod online;
 pub mod service;
 
 pub mod rpc;
+
+pub mod online_rpc;

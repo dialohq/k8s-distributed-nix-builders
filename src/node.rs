@@ -221,6 +221,12 @@ impl Node {
         let m = Manifest::read(file)?;
         let id = m.id()?;
         let start = Instant::now();
+        let paths = m.paths.keys().cloned().collect::<Vec<_>>();
+        let _roots = if recovery {
+            None
+        } else {
+            Some(crate::online::guard(&self.base, &paths, false)?)
+        };
         let _admit = Lock::acquire(&self.base.join("admit.lock"), false)?;
         let _gc = Lock::acquire(&self.root.join("nix/var/nix/gc.lock"), true)?;
         let _paths = pathlocks(&self.root, m.paths.keys().cloned(), m.paths.len())?;
@@ -235,6 +241,7 @@ impl Node {
             )?;
             ensure!(accepted == m, "manifest differs from origin publication");
         }
+        self.online_restore_checkpoint()?;
         let mut admissions = Admissions::open(&self.base.join("admissions"))?;
         let state = if let Some(j) = admissions.get(&id)? {
             ensure!(j.manifest == m, "journal manifest mismatch");
@@ -563,6 +570,7 @@ impl Node {
         Err(err).context("launch namespace with unshare")
     }
     pub(crate) fn restore_admissions(&self) -> Result<Vec<Value>> {
+        self.online_restore_checkpoint()?;
         self.prepare(false)?;
         let mut rows = Vec::new();
         let admissions = Admissions::open(&self.base.join("admissions"))?;
@@ -617,6 +625,11 @@ impl Node {
     pub fn publication(&self, file: &Path, commit: bool) -> Result<Value> {
         let m = Manifest::read(file)?;
         let id = m.id()?;
+        let _roots = crate::online::guard(
+            &self.base,
+            &m.paths.keys().cloned().collect::<Vec<_>>(),
+            false,
+        )?;
         let _publish = Lock::acquire(&self.base.join("publish.lock"), false)?;
         let _gc = Lock::acquire(&self.origin.join("nix/var/nix/gc.lock"), true)?;
         let result = crate::native::check(&self.origin, &m)?;
@@ -674,6 +687,7 @@ impl Node {
         Ok(json!({"batch":id,"records":m.paths.len(),"committed":commit}))
     }
     pub fn pin(&self, paths: &[String]) -> Result<Value> {
+        let _roots = crate::online::guard(&self.base, paths, false)?;
         ensure!(
             !paths.is_empty() && paths.iter().all(|p| valid_path(p)),
             "invalid pin paths"
@@ -704,6 +718,11 @@ impl Node {
             )?)
         } else {
             None
+        };
+        let _publication = if coordinator {
+            None
+        } else {
+            Some(Lock::acquire(&self.base.join("publication.lock"), true)?)
         };
         println!("leased");
         std::io::stdout().flush()?;

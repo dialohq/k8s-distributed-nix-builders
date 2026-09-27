@@ -139,6 +139,7 @@ pub unsafe extern "C" fn distributed_nix_runtime_v1(
                 enqueue_realisation(Path::new("/run/distributed-nix"), Path::new("/"), &request)?;
                 Ok(Value::Null)
             }
+            5 => crate::online::pin_runtime(&serde_json::from_value::<Vec<String>>(request)?),
             _ => bail!("unknown runtime callback"),
         }
     })
@@ -171,6 +172,8 @@ pub unsafe extern "C" fn distributed_nix_runtime_v1(
 }
 
 pub fn native_connection(root: &str, gate: i32, trusted: bool, runner: bool) -> Result<()> {
+    let group = crate::online::native_group(Path::new(root), runner)?;
+    group.activate()?;
     CONNECTION_GATE.store(gate, Ordering::Relaxed);
     if runner {
         for file in ["/proc", "/etc/resolv.conf"] {
@@ -248,6 +251,11 @@ impl Node {
             .into())
     }
     pub fn serve(&self, runner: bool) -> Result<Value> {
+        let _group = if runner {
+            Some(crate::online::native_group(&self.root, true)?)
+        } else {
+            None
+        };
         let socket = if runner {
             Path::new("/run/distributed-nix-runner/socket").to_path_buf()
         } else {

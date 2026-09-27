@@ -1,5 +1,6 @@
 #include "nix_bridge.h"
 #include "nix/main/shared.hh"
+#include "nix/util/callback.hh"
 #include "nix/store/local-store.hh"
 #include "nix/store/gc-store.hh"
 #include "nix/store/path-info.hh"
@@ -45,8 +46,35 @@ public:
     explicit SharedLocalStore(nix::ref<const nix::LocalStoreConfig> config)
         : nix::Store(*config), nix::LocalFSStore(*config), nix::LocalStore(config) {}
 
+    bool isValidPathUncached(const nix::StorePath & path) override
+    {
+        runtime(5, std::vector<std::string>{printStorePath(path)});
+        return nix::LocalStore::isValidPathUncached(path);
+    }
+
+    void queryPathInfoUncached(const nix::StorePath & path,
+        nix::Callback<std::shared_ptr<const nix::ValidPathInfo>> callback) noexcept override
+    {
+        try { runtime(5, std::vector<std::string>{printStorePath(path)}); }
+        catch (...) { callback.rethrow(); return; }
+        nix::LocalStore::queryPathInfoUncached(path, std::move(callback));
+    }
+
+    void addTempRoot(const nix::StorePath & path) override
+    {
+        runtime(5, std::vector<std::string>{printStorePath(path)});
+        nix::LocalStore::addTempRoot(path);
+    }
+
     void registerValidPaths(const nix::ValidPathInfos & infos) override
     {
+        std::vector<std::string> pins;
+        for (const auto & [path, info] : infos) {
+            pins.push_back(printStorePath(path));
+            for (const auto & ref : info.references) pins.push_back(printStorePath(ref));
+            if (info.deriver) pins.push_back(printStorePath(*info.deriver));
+        }
+        runtime(5, pins);
         std::vector<std::string> paths;
         for (const auto & [path, info] : infos)
             if (!isValidPath(path)) paths.push_back(printStorePath(path));
@@ -57,6 +85,9 @@ public:
 
     void registerDrvOutput(const nix::Realisation & info) override
     {
+        std::vector<std::string> pins{printStorePath(info.outPath)};
+        for (const auto & [id, path] : info.dependentRealisations) pins.push_back(printStorePath(path));
+        runtime(5, pins);
         auto old = queryRealisation(info.id);
         runtime(4, nlohmann::json(old ? nix::Realisation{*old, info.id} : info));
         nix::LocalStore::registerDrvOutput(info);
@@ -152,7 +183,7 @@ int reply(distributed_nix_buffer *out, std::string_view text, int status) noexce
 
 nlohmann::json invoke(uint32_t op, const char *uri, const nlohmann::json &input)
 {
-    if (op < DISTRIBUTED_NIX_DUMP || op > 13)
+    if (op < DISTRIBUTED_NIX_DUMP || op > 14)
         throw std::invalid_argument("unknown Nix bridge operation");
     std::call_once(initialized, [] { nix::initNix(); });
     auto store = nix::openStore(uri);
@@ -296,9 +327,15 @@ nlohmann::json invoke(uint32_t op, const char *uri, const nlohmann::json &input)
     }
     auto *local = dynamic_cast<nix::LocalStore *>(&*store);
     if (!local) throw nix::Error("admission requires a native local store");
-    if (op == DISTRIBUTED_NIX_GC_SNAPSHOT) {
+    if (op == DISTRIBUTED_NIX_GC_SNAPSHOT || op == 14) {
         nix::GCOptions options; options.action = nix::GCAction::gcReturnLive;
-        nix::GCResults live; local->collectGarbage(options, live);
+        nix::GCResults live;
+        if (op == 14) {
+            auto prefix = local->config->stateDir.get() + "/gcroots/distributed-nix/";
+            for (const auto & [path, sources] : local->findRoots(false))
+                for (const auto & source : sources)
+                    if (!source.starts_with(prefix)) { live.paths.insert(store->printStorePath(path)); break; }
+        } else local->collectGarbage(options, live);
         auto paths = store->queryAllValidPaths();
         std::map<std::string, std::set<std::string>> graph;
         for (const auto &p : paths) {

@@ -102,27 +102,27 @@ pub fn plan(id: &str, snapshots: &[Snapshot]) -> Result<Plan> {
     p.validate()?;
     Ok(p)
 }
-fn valid_id(id: &str) -> Result<()> {
+pub(crate) fn valid_id(id: &str) -> Result<()> {
     ensure!(
         id.len() == 32 && id.bytes().all(|c| c.is_ascii_hexdigit()),
         "invalid GC epoch"
     );
     Ok(())
 }
-fn remove_file(p: &Path) -> Result<()> {
+pub(crate) fn remove_file(p: &Path) -> Result<()> {
     if present(p) {
         fs::remove_file(p)?;
         syncdir(p.parent().context("parent")?)?;
     }
     Ok(())
 }
-fn rename(from: &Path, to: &Path) -> Result<()> {
+pub(crate) fn rename(from: &Path, to: &Path) -> Result<()> {
     fs::rename(from, to)?;
     syncdir(from.parent().unwrap())?;
     syncdir(to.parent().unwrap())
 }
 impl Node {
-    fn gc_native(&self, root: &Path, operation: &str, request: &Value) -> Result<Value> {
+    pub(crate) fn gc_native(&self, root: &Path, operation: &str, request: &Value) -> Result<Value> {
         // Native roots can point to /work/result inside the canonical view.
         // Resolving those links from the VM host namespace would lose live roots.
         // Keep the environment's actual mount identities too. Cloning and
@@ -137,7 +137,7 @@ impl Node {
     pub(crate) fn gc_active(&self) -> PathBuf {
         self.base.join("gc-active.json")
     }
-    fn gc_epoch(&self, id: &str) -> Result<PathBuf> {
+    pub(crate) fn gc_epoch(&self, id: &str) -> Result<PathBuf> {
         valid_id(id)?;
         Ok(self.base.join("gc").join(id))
     }
@@ -231,6 +231,10 @@ impl Node {
     pub(crate) fn gc_freeze(&self, id: &str) -> Result<Value> {
         valid_id(id)?;
         let _gate = Lock::acquire(&self.base.join("maintenance.lock"), false)?;
+        ensure!(
+            !self.base.join("online-gc.json").exists(),
+            "resume online GC first"
+        );
         if self.gc_active().exists() {
             self.gc_require(id)?;
         } else {
@@ -266,6 +270,7 @@ impl Node {
         Self::gc_restore_roots(root)?;
         // Finish old interrupted admissions while the collection is still intact.
         if !origin {
+            self.prune_client_roots(&BTreeSet::new())?;
             self.restore_admissions()?;
             self.prune_uncommitted_outbox()?;
         } else {
@@ -326,6 +331,13 @@ impl Node {
         Ok(serde_json::to_value(snapshot)?)
     }
     fn gc_checkpoint(&self, id: &str, keep: &BTreeSet<String>) -> Result<()> {
+        self.gc_checkpoint_filter(id, |path| keep.contains(path))
+    }
+    pub(crate) fn gc_checkpoint_filter(
+        &self,
+        id: &str,
+        retain: impl Fn(&str) -> bool,
+    ) -> Result<()> {
         let epoch = self.gc_epoch(id)?;
         let old = epoch.join("old-admissions");
         let next = epoch.join("new-admissions");
@@ -336,12 +348,12 @@ impl Node {
             let mut kinds = BTreeMap::new();
             Admissions::open(&active)?.for_each(|j| {
                 for (id, value) in &j.manifest.realisations {
-                    if keep.contains(&realisation_path(&value["outPath"])?) {
+                    if retain(&realisation_path(&value["outPath"])?) {
                         realisations.insert(id.clone(), value.clone());
                     }
                 }
                 for (p, k) in j.plan {
-                    if keep.contains(&p) {
+                    if retain(&p) {
                         paths.insert(p.clone(), j.manifest.paths[&p].clone());
                         if let Some(previous) = kinds.insert(p, k) {
                             ensure!(previous == k, "inconsistent admission plans");

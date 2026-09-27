@@ -325,6 +325,32 @@ fn native_transaction_roundtrip_conflict_and_concurrent_calls() -> Result<()> {
         error.to_string().contains("still alive"),
         "GC disabled native liveness checks"
     );
+    let safety = target.join("nix/var/nix/gcroots/distributed-nix");
+    fs::create_dir_all(&safety)?;
+    std::os::unix::fs::symlink(&paths[1], safety.join("shared"))?;
+    let online = native::online_snapshot(&target)?;
+    ensure!(
+        online["live"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(paths[0])),
+        "online mark lost an ordinary root"
+    );
+    ensure!(
+        !online["live"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(paths[1])),
+        "synthetic sharing pin made dead paths immortal"
+    );
+    let ordinary = native::gc_snapshot(&target)?;
+    ensure!(
+        ordinary["live"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(paths[1]))
+    );
+    fs::remove_file(safety.join("shared"))?;
     fs::remove_file(root)?;
     let dead = paths.iter().cloned().collect();
     native::gc_delete(&target, &dead)?;
