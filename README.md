@@ -28,19 +28,26 @@ The chart creates one store StatefulSet, a three-member warm builder StatefulSet
 ```mermaid
 flowchart LR
   A[Native Nix clients] --> B[Builder pods: native daemon + private SQLite PVC]
-  B -->|Authenticated gRPC: publication and GC| S[Store pod: coordinator + NFS-Ganesha]
+  B -->|Authenticated gRPC: publication and GC| S[Store pod: coordinator + kernel NFS]
   B -->|Read-only NFS| P[Shared package collection PVC]
   S --> P
 ```
 
 Each builder retains its own writable store, SQLite database, admission journal, and recovery state. Completed outputs are copied once to the shared collection using native Nix transfer streams over gRPC. Peers register their metadata and bind-mount shared paths into their local store view. SQLite files never live on NFS. Builds execute inside the builder pod; no host Nix installation, host store mount, SSH transport, host daemon, or Kubernetes API access is required.
 
-The store pod serves NFSv4 using userspace Ganesha and coordinates online GC. It never deletes shared files before every configured participant acknowledges safe retirement. Kubernetes Service DNS supplies stable addresses. PVCs survive pod replacement and Helm uninstall. See [ONLINE_GC.md](ONLINE_GC.md), [ADMISSIONS.md](ADMISSIONS.md), and the [concurrency audit](RACES.md).
+The `distributed-nix pod` Rust supervisor owns startup, readiness and child shutdown.
+Mounts use Linux syscalls; kernel NFSD uses its control filesystem; runtime seeding
+calls native Nix through the C ABI. Native operations run in isolated child processes
+so blocking Nix work can be cancelled safely. Standard `nfs-utils` authorization and
+recovery daemons remain; `exportfs` prepares their export table. Tini only reaps orphan
+processes as PID 1. There is no shell entrypoint.
+
+The store pod serves NFSv4 using Linux kernel NFSD in its own network namespace and coordinates online GC. Standard `nfs-utils` helpers handle export authorization and persistent client recovery; file I/O runs in the kernel. Client recovery state lives on the store PVC. No userspace NFS server or alternative backend is included. It never deletes shared files before every configured participant acknowledges safe retirement. Kubernetes Service DNS supplies stable addresses. PVCs survive pod replacement and Helm uninstall. See [ONLINE_GC.md](ONLINE_GC.md), [ADMISSIONS.md](ADMISSIONS.md), and the [concurrency audit](RACES.md).
 
 ## Requirements and current boundaries
 
-- Linux x86-64 nodes with kernel NFS client support, privileged pods, and mount namespace support. The image includes the userspace mount helper. This is ordinary Kubernetes, but not compatible with a restricted Pod Security policy.
-- RWO PVCs backed by local/block POSIX filesystems such as ext4 or XFS. Ganesha's VFS export requires filesystem file handles; container overlay filesystems and NFS-backed metadata PVCs are unsuitable. Choose storage that fences old writers when moving a PVC.
+- Linux x86-64 nodes with kernel NFS client and server support (`nfs` and `nfsd` modules loaded; Linux 5.8 or newer), privileged pods, and mount namespace support. This is ordinary Kubernetes, but not compatible with a restricted Pod Security policy.
+- RWO PVCs backed by local/block POSIX filesystems such as ext4 or XFS. Kernel NFS requires an exportable filesystem; container overlay filesystems and NFS-backed metadata PVCs are unsuitable. Choose storage that fences old writers when moving a PVC.
 - Trusted builders and a trusted cluster network. RPC has bearer authentication; TLS is not implemented. The chart restricts incoming RPC/NFS to its pods when the CNI enforces NetworkPolicy. NFS uses AUTH_SYS.
 - Pool membership is chosen at installation and recorded on each PVC. Resizing an existing pool is deliberately rejected until a retirement protocol exists. Missing participants prevent GC. Do not force-delete a pod whose old process may still be running.
 - Roots acquired through a builder remain pinned for that pod's lifetime. Replacing the pod retires those pins after surviving leases close, while keeping its database and cache. This is conservative, not per-job reclamation.

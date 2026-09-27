@@ -31,6 +31,7 @@ jobs:
       - name: Start ordinary Kubernetes
         run: |
           sudo modprobe nfs
+          sudo modprobe nfsd
           sudo mkdir -p /mnt/distributed-nix-kind
           kind create cluster --config deploy/kind.yaml --wait 120s
           kind load image-archive "$(readlink -f image)"

@@ -80,13 +80,7 @@ pub(crate) fn physical(root: &Path, p: &str) -> PathBuf {
 pub(crate) fn present(p: &Path) -> bool {
     p.symlink_metadata().is_ok()
 }
-pub(crate) fn mountpoint(p: &Path) -> Result<bool> {
-    Ok(Command::new("mountpoint")
-        .arg("-q")
-        .arg(p)
-        .status()?
-        .success())
-}
+pub(crate) use crate::linux::mountpoint;
 fn readonly_mounts(info: &str) -> std::collections::BTreeSet<PathBuf> {
     let mut mounts = BTreeMap::new();
     for line in info.lines() {
@@ -104,21 +98,12 @@ fn readonly_mounts(info: &str) -> std::collections::BTreeSet<PathBuf> {
         .map(|(path, _)| PathBuf::from(path))
         .collect()
 }
-fn mount(src: &Path, dst: &Path, opts: &str, typ: Option<&str>) -> Result<()> {
+fn bind(src: &Path, dst: &Path) -> Result<()> {
     fs::create_dir_all(dst)?;
     if !mountpoint(dst)? {
-        let mut c = Command::new("mount");
-        c.args(["-o", opts]);
-        if let Some(t) = typ {
-            c.args(["-t", t]);
-        }
-        run(c.arg(src).arg(dst))?;
+        crate::linux::bind(src, dst)?;
     }
-    Ok(())
-}
-fn bind(src: &Path, dst: &Path) -> Result<()> {
-    mount(src, dst, "bind", None)?;
-    run(Command::new("mount").arg("--make-private").arg(dst))
+    crate::linux::mount(None, dst, None, libc::MS_PRIVATE, None)
 }
 fn link(target: &Path, dst: &Path) -> Result<()> {
     if present(dst) {
@@ -352,7 +337,7 @@ impl Node {
                     );
                     let already_readonly = readonly.contains(&dst);
                     if !already_readonly && !mountpoint(&dst)? {
-                        run(Command::new("mount").arg("--bind").arg(&src).arg(&dst))?;
+                        crate::linux::bind(&src, &dst)?;
                     }
                     let (a, b) = (src.metadata()?, dst.metadata()?);
                     ensure!(
@@ -360,9 +345,13 @@ impl Node {
                         "mount provenance mismatch: {p}"
                     );
                     if !already_readonly {
-                        run(Command::new("mount")
-                            .args(["-o", "remount,bind,ro"])
-                            .arg(&dst))?;
+                        crate::linux::mount(
+                            None,
+                            &dst,
+                            None,
+                            libc::MS_REMOUNT | libc::MS_BIND | libc::MS_RDONLY,
+                            None,
+                        )?;
                     }
                     mounted += 1;
                 }
@@ -472,15 +461,10 @@ impl Node {
         if !origin {
             // The runtime mounts the backend; admission only needs POSIX paths.
             ensure!(mountpoint(&self.lower)?, "shared collection is not mounted");
-            mount(
-                &root.join("nix/store"),
-                &root.join("nix/store"),
-                "bind",
-                None,
-            )?;
-            run(Command::new("mount")
-                .arg("--make-shared")
-                .arg(root.join("nix/store")))?;
+            if !mountpoint(&root.join("nix/store"))? {
+                crate::linux::bind(&root.join("nix/store"), &root.join("nix/store"))?;
+            }
+            crate::linux::mount(None, &root.join("nix/store"), None, libc::MS_SHARED, None)?;
         }
         fs::create_dir_all(self.base.join("admissions"))?;
         Ok(())
@@ -533,7 +517,7 @@ impl Node {
         roots(&self.origin, &m.roots)?;
         if commit {
             crate::native::register(&self.origin, &m)?;
-            run(Command::new("sync").arg("-f").arg(&self.origin))?;
+            crate::linux::sync_filesystem(&self.origin)?;
             // Export manifest together with data. Readers trust this administrator-owned marker.
             durable(
                 &self
@@ -580,11 +564,11 @@ impl Node {
             "invalid pin paths"
         );
         let _gc = Lock::acquire(&self.root.join("nix/var/nix/gc.lock"), true)?;
-        run(Command::new("nix-store")
-            .arg("--store")
-            .arg(&self.root)
-            .arg("--check-validity")
-            .args(paths))?;
+        let valid = crate::native::valid_paths(&self.root, paths)?;
+        ensure!(
+            valid.as_array().context("native valid paths")?.len() == paths.len(),
+            "cannot pin invalid store paths"
+        );
         roots(&self.root, paths)?;
         Ok(json!({"pinned":paths}))
     }
@@ -603,7 +587,14 @@ impl Node {
             return self.connection(arg(args, 1)? == "trusted");
         }
         if op == "runner-daemon" {
-            return self.serve();
+            return self.serve_with_ready(|| {
+                if args.get(1).map(String::as_str) == Some("--notify-ready") {
+                    use std::io::Write;
+                    std::io::stdout().write_all(b"R")?;
+                    std::io::stdout().flush()?;
+                }
+                Ok(())
+            });
         }
         if op == "recover" {
             let _gate = Lock::acquire(&self.base.join("maintenance.lock"), false)?;

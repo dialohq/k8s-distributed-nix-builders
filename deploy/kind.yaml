@@ -3,6 +3,6 @@ apiVersion: kind.x-k8s.io/v1alpha4
 nodes:
   - role: control-plane
     extraMounts:
-      # Ganesha needs an exportable filesystem, not the node container's overlay.
+      # Kernel NFS needs an exportable filesystem, not the node container's overlay.
       - hostPath: /mnt/distributed-nix-kind
         containerPath: /var/local-path-provisioner

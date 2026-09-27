@@ -224,9 +224,8 @@ use crate::{
     gc::{Plan, Snapshot, remove_file, rename, valid_id},
     manifest::{Manifest, realisation_path},
     node::{Kind, journals, mountpoint, physical, present},
-    util::{failpoint, run},
+    util::failpoint,
 };
-use std::process::Command;
 
 pub fn candidates(plan: &Plan) -> BTreeSet<String> {
     plan.workers
@@ -471,7 +470,7 @@ impl Node {
                         matches!(kinds.get(path), Some(Kind::MountDir | Kind::MountFile)),
                         "unknown mount: {path}"
                     );
-                    run(Command::new("umount").arg(destination))?;
+                    crate::linux::unmount(&destination)?;
                 }
                 self.gc_restore_derivation(path, kinds.get(path).copied())?;
             }
@@ -506,7 +505,7 @@ impl Node {
             syncdir(&safety)?;
         }
         let result = self.gc_native(root, "delete", &serde_json::to_value(dead)?)?;
-        run(Command::new("sync").arg("-f").arg(root))?;
+        crate::linux::sync_filesystem(root)?;
         failpoint("online-after-delete");
         let row = json!({"id":id,"role":role,"node":node,"result":result});
         durable(&ack, &row)?;

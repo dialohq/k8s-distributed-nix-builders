@@ -53,6 +53,16 @@ not elapsed time, grants access. SQLite's busy timeout bounds contention errors;
 transactions and fences provide atomicity. `Instant` measurements are reporting
 only. No timer authorizes shared deletion or expires a retirement fence.
 
+Kernel NFS lease/grace periods govern the external NFS protocol, not Nix GC
+eligibility. Client recovery records persist on the store PVC through `nfsdcld`.
+The Rust pod supervisor owns and reaps each child, handles SIGTERM/SIGINT, and
+stops its network namespace's NFSD threads before stopping NFS helper daemons.
+Container restart also resets NFSD threads left in the surviving pod network
+namespace. Native daemon readiness is an explicit pipe acknowledgement. Tests
+exercise unexpected child exit and cleanup after startup failure using socket
+acknowledgements, without sleeps. The earlier shell supervisor was removed;
+its shutdown trap could spin over an already-reaped Bash child.
+
 Linux flock ownership follows open file descriptions, including duplicates
 inherited by fork; it is not a process-local mutex. See the
 [Linux flock documentation](https://man7.org/linux/man-pages/man2/flock.2.html).

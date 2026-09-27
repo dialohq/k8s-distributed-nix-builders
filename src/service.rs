@@ -149,7 +149,7 @@ pub fn native_connection(root: &str, trusted: bool) -> Result<()> {
     let group = crate::online::native_group(Path::new(root))?;
     group.activate()?;
     for file in ["/proc", "/etc/resolv.conf"] {
-        run(Command::new("mount").args(["--bind", file, &format!("{root}{file}")]))?;
+        crate::linux::bind(Path::new(file), Path::new(&format!("{root}{file}")))?;
     }
     crate::node::enter_root(root)?;
     crate::native::serve(trusted)
@@ -204,9 +204,8 @@ impl Node {
             .map(|p| format!("{}/bin", p.as_str().unwrap()))
             .collect::<Vec<_>>()
             .join(":");
-        Err(Command::new("unshare")
-            .args(["--mount", "--propagation", "slave"])
-            .arg(std::env::current_exe()?)
+        crate::linux::private_mount_namespace()?;
+        Err(Command::new(std::env::current_exe()?)
             .arg("native-daemon")
             .arg(&self.root)
             .arg(if trusted { "trusted" } else { "untrusted" })
@@ -215,7 +214,7 @@ impl Node {
             .exec()
             .into())
     }
-    pub fn serve(&self) -> Result<Value> {
+    pub fn serve_with_ready(&self, ready: impl FnOnce() -> Result<()>) -> Result<Value> {
         let _group = crate::online::native_group(&self.root)?;
         let socket = Path::new("/run/distributed-nix-runner/socket");
         if socket.exists() {
@@ -223,6 +222,7 @@ impl Node {
         }
         let listener = UnixListener::bind(socket)?;
         fs::set_permissions(socket, fs::Permissions::from_mode(0o666))?;
+        ready()?;
         for stream in listener.incoming() {
             let stream = stream?;
             let mut creds: libc::ucred = unsafe { std::mem::zeroed() };
