@@ -70,19 +70,21 @@ def replace(pod):
     eventually(renewed, timeout=300)
 
 
-def build(pod, expression, no_build=False):
+def build(pod, expression, no_build=False, barrier=None):
     flags = ['--max-jobs', '0'] if no_build else []
+    if barrier:
+        flags += ['--option', 'extra-sandbox-paths', '/run/e2e-barrier=' + barrier]
     return execute(pod, 'nix', 'build', '--impure', '--no-link', '--print-out-paths',
                    '--option', 'substituters', '', *flags, '--expr', expression).stdout.strip()
 
 
-def expression(name, ca=False, delay=0):
+def expression(name, ca=False, barrier=False):
     return '''let r = builtins.fromJSON (builtins.readFile /etc/distributed-nix/runtime.json); in
     derivation { name = "%s"; system = builtins.currentSystem;
       builder = "${builtins.storePath r.bash}/bin/bash"; PATH = "${builtins.storePath r.coreutils}/bin";
-      args = [ "-ec" "sleep %s; mkdir -p $out; echo %s > $out/result" ];
+      args = [ "-ec" "%s mkdir -p $out; echo %s > $out/result" ];
       %s
-    }''' % (name, delay, name, ' __contentAddressed = true; outputHashMode = "recursive"; outputHashAlgo = "sha256";' if ca else '')
+    }''' % (name, "echo ready > /run/e2e-barrier/ready; read release < /run/e2e-barrier/release;" if barrier else "", name, ' __contentAddressed = true; outputHashMode = "recursive"; outputHashAlgo = "sha256";' if ca else '')
 
 
 started = time.monotonic()
@@ -130,12 +132,21 @@ execute(store, "test", "-f", "/var/lib/distributed-nix/online-master.json")
 execute(store, 'distributed-nix', 'gc')
 passed('coordinator_crash_resume')
 
+barrier = '/work/' + name + '-barrier'
+execute(builders[1], 'mkdir', '-m', '0777', barrier)
+execute(builders[1], 'mkfifo', '-m', '0666', barrier + '/ready', barrier + '/release')
 with concurrent.futures.ThreadPoolExecutor() as pool:
-    future = pool.submit(build, builders[1], expression(name + '-active', delay=15))
-    time.sleep(3)
-    execute(store, 'distributed-nix', 'gc')
+    future = pool.submit(build, builders[1], expression(name + '-active', barrier=True), barrier=barrier)
+    # The build acknowledges startup, then blocks until this test releases it.
+    execute(builders[1], 'bash', '-ec', 'read -r signal < "$1"; test "$signal" = ready', 'barrier', barrier + '/ready')
+    try:
+        execute(store, 'distributed-nix', 'gc')
+        assert not future.done(), 'build finished before its release barrier'
+    finally:
+        execute(builders[1], 'bash', '-ec', 'echo release > "$1"', 'barrier', barrier + '/release')
     live = future.result(timeout=180)
     assert execute(builders[1], 'cat', live + '/result').stdout.strip() == name + '-active'
+execute(builders[1], 'rm', '-rf', barrier)
 passed('build_during_gc')
 
 # All pods which touched the first output are retired, then GC can reclaim it.

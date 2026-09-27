@@ -12,7 +12,7 @@ use distributed_nix::{
     util::{durable, output},
 };
 use serde_json::json;
-use std::{fs, path::PathBuf, process::Command, time::Duration};
+use std::{fs, path::PathBuf, process::Command};
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::Server;
 
@@ -136,13 +136,15 @@ async fn native_stream_publication_is_authenticated_retryable_and_cannot_collect
     drop(lease);
     drop(client);
     drop(unauthenticated);
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await?;
     drop(lock);
+    // Acquiring the actual exclusive gate is the acknowledgement of cancellation.
+    // No delay is evidence that the server has released its publication leases.
+    let base = node.base.clone();
+    let released = tokio::task::spawn_blocking(move || {
+        distributed_nix::util::Lock::acquire(&base.join("publication.lock"), false)
+    })
+    .await??;
+    drop(released);
     stop.send(()).unwrap();
     task.await??;
     Ok(())
@@ -176,5 +178,52 @@ fn membership_accepts_dns_and_arbitrary_pool_size_but_rejects_reuse() -> Result<
         config.nodes.pop();
         ensure!(distributed_nix::online_rpc::Service::new(node, config).is_err());
     }
+    Ok(())
+}
+
+#[test]
+fn concurrent_membership_initialization_has_one_winner() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let node = Node {
+        base: directory.path().join("state"),
+        ..Node::default()
+    };
+    let token = directory.path().join("token");
+    fs::write(&token, "concurrent-membership-012345678901234567890")?;
+    let start = std::sync::Barrier::new(2);
+    let outcomes = std::thread::scope(|scope| {
+        let jobs: Vec<_> = ["first:9840", "second:9840"]
+            .into_iter()
+            .map(|endpoint| {
+                let node = node.clone();
+                let token = token.clone();
+                let start = &start;
+                scope.spawn(move || {
+                    let config = Config {
+                        nodes: vec![endpoint.into()],
+                        index: 0,
+                        token_file: token,
+                        pod_uid: None,
+                    };
+                    start.wait();
+                    (
+                        endpoint,
+                        distributed_nix::online_rpc::Service::new(node, config).is_ok(),
+                    )
+                })
+            })
+            .collect();
+        jobs.into_iter()
+            .map(|job| job.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    let winners: Vec<_> = outcomes
+        .into_iter()
+        .filter(|(_, success)| *success)
+        .collect();
+    ensure!(winners.len() == 1);
+    let membership: serde_json::Value =
+        serde_json::from_slice(&fs::read(node.base.join("membership.json"))?)?;
+    ensure!(membership["nodes"] == json!([winners[0].0]));
     Ok(())
 }

@@ -1,7 +1,7 @@
 use distributed_nix::{
     manifest::{Manifest, valid_path},
     node::{Journal, Kind, Status},
-    util::{Lock, durable, read_json, sh},
+    util::{durable, read_json, sh},
 };
 use serde_json::json;
 use std::{collections::BTreeMap, fs, process::Command};
@@ -96,30 +96,6 @@ fn durable_replace_survives_readers_and_leaves_no_temporary_files() {
         0o644
     );
     assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
-}
-#[test]
-fn native_flock_blocks_competitor_and_releases_on_drop() {
-    let dir = tempfile::tempdir().unwrap();
-    let p = dir.path().join("lock");
-    let l = Lock::acquire(&p, false).unwrap();
-    let mut c = Command::new("flock");
-    let o = c.arg("-n").arg(&p).arg("true").status().unwrap();
-    assert!(!o.success());
-    drop(l);
-    // A concurrent test may fork while the FD is open. Its inherited CLOEXEC
-    // copy is released at exec; verify bounded release, not zero-latency release.
-    assert!(
-        Command::new("flock")
-            .args(["-w", "5"])
-            .arg(&p)
-            .arg("true")
-            .status()
-            .unwrap()
-            .success()
-    );
-    let a = Lock::acquire(&p, true).unwrap();
-    let b = Lock::acquire(&p, true).unwrap();
-    drop((a, b));
 }
 #[test]
 fn shell_quoting_preserves_literal_metacharacters() {

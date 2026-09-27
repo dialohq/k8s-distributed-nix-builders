@@ -45,12 +45,11 @@ cp /srv/distributed-nix/worker/etc/nix/nix.conf /etc/nix/nix.conf
 cp /srv/distributed-nix/worker/etc/passwd /etc/passwd
 cp /srv/distributed-nix/worker/etc/group /etc/group
 if [ "$role" = builder ]; then
-  distributed-nix node runner-daemon & pids+=("$!")
-  for ((attempt=0; attempt<100; attempt++)); do
-    test -S /run/distributed-nix-runner/socket && break
+  distributed-nix node runner-daemon & daemon_pid=$!; pids+=("$daemon_pid")
+  while ! test -S /run/distributed-nix-runner/socket; do
+    kill -0 "$daemon_pid" || exit 1
     sleep .1
   done
-  test -S /run/distributed-nix-runner/socket
 fi
 distributed-nix serve & pids+=("$!")
 if [ "$role" = store ]; then

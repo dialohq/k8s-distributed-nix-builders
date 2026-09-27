@@ -221,7 +221,7 @@ impl Node {
         let _roots = if recovery {
             None
         } else {
-            Some(crate::online::guard(&self.base, &paths, false)?)
+            Some(crate::online::guard(&self.base, &paths)?)
         };
         let _admit = Lock::acquire(&self.base.join("admit.lock"), false)?;
         let _gc = Lock::acquire(&self.root.join("nix/var/nix/gc.lock"), true)?;
@@ -515,11 +515,8 @@ impl Node {
     pub fn publication(&self, file: &Path, commit: bool) -> Result<Value> {
         let m = Manifest::read(file)?;
         let id = m.id()?;
-        let _roots = crate::online::guard(
-            &self.base,
-            &m.paths.keys().cloned().collect::<Vec<_>>(),
-            false,
-        )?;
+        let _roots =
+            crate::online::guard(&self.base, &m.paths.keys().cloned().collect::<Vec<_>>())?;
         let _publish = Lock::acquire(&self.base.join("publish.lock"), false)?;
         let _gc = Lock::acquire(&self.origin.join("nix/var/nix/gc.lock"), true)?;
         let result = crate::native::check(&self.origin, &m)?;
@@ -577,7 +574,7 @@ impl Node {
         Ok(json!({"batch":id,"records":m.paths.len(),"committed":commit}))
     }
     pub fn pin(&self, paths: &[String]) -> Result<Value> {
-        let _roots = crate::online::guard(&self.base, paths, false)?;
+        let _roots = crate::online::guard(&self.base, paths)?;
         ensure!(
             !paths.is_empty() && paths.iter().all(|p| valid_path(p)),
             "invalid pin paths"
@@ -687,11 +684,15 @@ pub fn enter_chroot(root: &str) -> Result<()> {
 }
 pub fn enter_root(root: &str) -> Result<()> {
     std::env::set_current_dir(root)?;
-    let suffix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_nanos();
-    let old = format!(".oldroot-{}-{suffix}", std::process::id());
-    fs::create_dir(&old)?;
+    let old = tempfile::Builder::new()
+        .prefix(".oldroot-")
+        .tempdir_in(".")?
+        .keep();
+    let old = old
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("old root directory name")?
+        .to_owned();
     let dot = CString::new(".")?;
     let old_c = CString::new(old.as_str())?;
     // SAFETY: NUL-terminated paths remain alive for the Linux syscall.
