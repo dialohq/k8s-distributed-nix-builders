@@ -295,6 +295,29 @@ impl Node {
         Ok(json!({"acknowledged":paths.len()}))
     }
 }
+fn publish_queued(
+    paths: Vec<String>,
+    publish: impl FnOnce(&[String]) -> Result<Value>,
+    mut acknowledge: impl FnMut(&[String]) -> Result<()>,
+) -> Result<Value> {
+    if paths.is_empty() {
+        return Ok(Value::Null);
+    }
+    let publication = publish(&paths[..paths.len().min(128)])?;
+    let published: std::collections::BTreeSet<String> =
+        serde_json::from_value(publication["published_paths"].clone())?;
+    // Only acknowledge the queued snapshot after the complete canonical closure
+    // has committed and every participant has admitted it.
+    let acknowledged: Vec<_> = paths
+        .into_iter()
+        .filter(|p| published.contains(p))
+        .collect();
+    for batch in acknowledged.chunks(128) {
+        acknowledge(batch)?;
+    }
+    Ok(publication)
+}
+
 impl Cluster {
     fn publish_ca_pending(&self, node: usize) -> Result<Vec<Value>> {
         let ca = self.call_json(node, &["ca-outbox".into()])?;
@@ -343,15 +366,16 @@ impl Cluster {
             let result = (|| -> Result<Value> {
                 let paths: Vec<String> =
                     serde_json::from_value(self.call_json(n, &["outbox".into()])?)?;
-                if paths.is_empty() {
-                    return Ok(Value::Null);
-                }
-                let batch: Vec<_> = paths.into_iter().take(128).collect();
-                let publication = self.publish(n, &batch)?;
-                let mut args = vec!["acknowledge".into()];
-                args.extend(batch);
-                self.call_json(n, &args)?;
-                Ok(publication)
+                publish_queued(
+                    paths,
+                    |batch| self.publish(n, batch),
+                    |batch| {
+                        let mut args = vec!["acknowledge".into()];
+                        args.extend_from_slice(batch);
+                        self.call_json(n, &args)?;
+                        Ok(())
+                    },
+                )
             })();
             rows.push(match result {
                 Ok(v) => v,
@@ -383,6 +407,47 @@ impl Cluster {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn publication_acknowledges_queued_dependencies_only_after_success() -> Result<()> {
+        let queued: Vec<_> = (0..300).map(|i| format!("path-{i}")).collect();
+        let mut acknowledged = Vec::new();
+        publish_queued(
+            queued.clone(),
+            |roots| {
+                ensure!(roots.len() == 128);
+                let mut closure = queued[..250].to_vec();
+                closure.push("not-in-queue-snapshot".into());
+                Ok(json!({"published_paths":closure}))
+            },
+            |batch| {
+                acknowledged.extend_from_slice(batch);
+                Ok(())
+            },
+        )?;
+        ensure!(acknowledged == queued[..250]);
+        let mut called = false;
+        let failed = publish_queued(
+            queued.clone(),
+            |_| bail!("one participant has not admitted the publication"),
+            |_| {
+                called = true;
+                Ok(())
+            },
+        );
+        ensure!(failed.is_err() && !called);
+        let malformed = publish_queued(
+            queued,
+            |_| Ok(json!({})),
+            |_| {
+                called = true;
+                Ok(())
+            },
+        );
+        ensure!(malformed.is_err() && !called);
+        Ok(())
+    }
+
     #[test]
     fn acknowledgement_cannot_interleave_entry_and_root_creation() -> Result<()> {
         let directory = tempfile::tempdir()?;

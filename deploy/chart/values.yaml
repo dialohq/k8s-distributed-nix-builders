@@ -1,6 +1,6 @@
 image:
   repository: ghcr.io/dialohq/k8s-distributed-nix-builders
-  tag: "0.3.0"
+  tag: "0.3.1"
   pullPolicy: IfNotPresent
 imagePullSecrets: []
 clusterDomain: cluster.local

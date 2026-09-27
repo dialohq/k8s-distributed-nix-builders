@@ -61,6 +61,6 @@ jobs:
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GHCR_USER" --password-stdin
           printf '%s' "$GHCR_TOKEN" | helm registry login ghcr.io --username "$GHCR_USER" --password-stdin
           docker load --input "$(readlink -f image)"
-          docker push ghcr.io/dialohq/k8s-distributed-nix-builders:0.3.0
+          docker push ghcr.io/dialohq/k8s-distributed-nix-builders:0.3.1
           helm package deploy/chart --destination /tmp
-          helm push /tmp/k8s-distributed-nix-builders-0.3.0.tgz oci://ghcr.io/dialohq/charts
+          helm push /tmp/k8s-distributed-nix-builders-0.3.1.tgz oci://ghcr.io/dialohq/charts
