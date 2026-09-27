@@ -17,24 +17,13 @@ use std::{
     },
     path::{Path, PathBuf},
     process::Command,
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 pub const BASE: &str = "/var/lib/distributed-nix";
 pub const ROOT: &str = "/srv/distributed-nix/worker";
 pub const ORIGIN: &str = "/srv/distributed-nix/origin";
 pub const BIN: &str = "/var/lib/distributed-nix/bin/distributed-nix";
-pub(crate) const UNIT: &str = "distributed-nix-daemon";
-fn stop_daemon() -> Result<()> {
-    let status = Command::new("systemctl").args(["stop", UNIT]).output()?;
-    ensure!(
-        status.status.success() || status.status.code() == Some(5),
-        "stop native daemon: {}",
-        String::from_utf8_lossy(&status.stderr)
-    );
-    Ok(())
-}
-
 #[derive(Clone, Debug)]
 pub struct Node {
     pub base: PathBuf,
@@ -385,23 +374,11 @@ impl Node {
         read_json(Path::new("/etc/distributed-nix/runtime.json"))
     }
     pub fn prepare(&self, origin: bool) -> Result<()> {
-        self.prepare_root(origin, false)
-    }
-    pub fn prepare_ephemeral(&self) -> Result<()> {
-        self.prepare_root(false, true)
-    }
-    fn prepare_root(&self, origin: bool, ephemeral: bool) -> Result<()> {
         let root = if origin { &self.origin } else { &self.root };
         let m = self.runtime()?;
         fs::create_dir_all(&self.base)?;
         fs::create_dir_all(root)?;
-        if ephemeral {
-            fs::set_permissions(&self.base, fs::Permissions::from_mode(0o755))?;
-            fs::set_permissions(root, fs::Permissions::from_mode(0o755))?;
-        }
-        if !ephemeral {
-            bind(root, root)?;
-        }
+        bind(root, root)?;
         for d in [
             "nix",
             "nix/var",
@@ -419,18 +396,10 @@ impl Node {
             "run",
         ] {
             fs::create_dir_all(root.join(d))?;
-            if ephemeral {
-                fs::set_permissions(root.join(d), fs::Permissions::from_mode(0o755))?;
-            }
         }
         fs::set_permissions(root.join("tmp"), fs::Permissions::from_mode(0o1777))?;
         let mut passwd =
             String::from("root:x:0:0:root:/root:/bin/sh\nnobody:x:65534:65534:nobody:/:/bin/sh\n");
-        if ephemeral {
-            passwd.push_str("runner:x:1001:1001:CI user:/home/runner:/bin/bash\n");
-            fs::create_dir_all(root.join("home/runner"))?;
-            std::os::unix::fs::chown(root.join("home/runner"), Some(1001), Some(1001))?;
-        }
         let mut builders = Vec::new();
         let build_group = m["buildGroupId"].as_u64().unwrap_or(30000);
         for index in 1..=32 {
@@ -491,20 +460,11 @@ impl Node {
         if !origin {
             bind(&self.base, &root.join("run/distributed-nix"))?;
         }
-        let audit = self.base.join("audit");
-        fs::create_dir_all(&audit)?;
-        bind(&audit, &root.join("roots"))?;
-        let hook = format!(
-            "#!{bash}/bin/bash\n{core}/bin/printf '%s|%s|%s\\n' {} \"${{DRV_PATH:-$1}}\" \"$({core}/bin/date +%s.%N)\" >> /roots/build-audit.log\n",
-            sh(&root.to_string_lossy())
-        );
-        fs::write(root.join("build-hook"), hook)?;
-        fs::set_permissions(root.join("build-hook"), fs::Permissions::from_mode(0o755))?;
         fs::write(
             root.join("etc/nix/nix.conf"),
             m["nixConfig"].as_str().context("runtime nixConfig")?,
         )?;
-        if !origin && !ephemeral {
+        if !origin {
             // The NixOS module mounts the backend; admission only needs POSIX paths.
             ensure!(mountpoint(&self.lower)?, "shared collection is not mounted");
             mount(
@@ -520,13 +480,7 @@ impl Node {
         fs::create_dir_all(self.base.join("admissions"))?;
         Ok(())
     }
-    pub fn command(
-        &self,
-        cmd: &str,
-        origin: bool,
-        lease: bool,
-        daemon_store: bool,
-    ) -> Result<Value> {
+    pub fn command(&self, cmd: &str, origin: bool, lease: bool) -> Result<Value> {
         let root = if origin { &self.origin } else { &self.root };
         if lease {
             let l = Lock::acquire(&self.base.join("clients.lock"), true)?;
@@ -558,11 +512,7 @@ impl Node {
             ))
             .args(["-i", "HOME=/root", "USER=root"])
             .arg(format!("PATH={path}"))
-            .arg(if daemon_store {
-                "NIX_REMOTE=daemon"
-            } else {
-                "NIX_REMOTE=local?path-info-cache-size=0"
-            })
+            .arg("NIX_REMOTE=local?path-info-cache-size=0")
             .arg(format!("{}/bin/bash", m["bash"].as_str().context("bash")?))
             .arg("-c")
             .arg(format!("set -e; {cmd}"))
@@ -588,34 +538,7 @@ impl Node {
             fs::remove_file(self.base.join("ready"))?;
             syncdir(&self.base)?;
         }
-        let running = self.base.join("native-daemon-v2.json").exists()
-            && self.gc_active().exists()
-            && Command::new("systemctl")
-                .args(["is-active", "--quiet", UNIT])
-                .status()?
-                .success();
-        if !running {
-            stop_daemon()?;
-        }
         let rows = self.restore_admissions()?;
-        if !running {
-            run(Command::new("systemctl").args(["start", UNIT]))?;
-        }
-        let deadline = Instant::now() + Duration::from_secs(15);
-        loop {
-            if std::os::unix::net::UnixStream::connect(
-                self.root.join("nix/var/nix/daemon-socket/socket"),
-            )
-            .is_ok()
-            {
-                break;
-            }
-            ensure!(
-                Instant::now() < deadline,
-                "native daemon socket did not become ready"
-            );
-            std::thread::sleep(Duration::from_millis(100));
-        }
         durable(
             &self.base.join("ready"),
             &json!({"recovered_batches":rows.len(),"boot_id":fs::read_to_string("/proc/sys/kernel/random/boot_id")?.trim()}),
@@ -709,21 +632,9 @@ impl Node {
         self.prepare(true)?;
         Ok(json!({"origin":"ready"}))
     }
-    fn hold_lease(&self, coordinator: bool) -> Result<Value> {
+    fn hold_lease(&self) -> Result<Value> {
         use std::io::Write;
-        let _coordinator = if coordinator {
-            Some(Lock::acquire(
-                &self.base.join("gc-coordinator.lock"),
-                false,
-            )?)
-        } else {
-            None
-        };
-        let _publication = if coordinator {
-            None
-        } else {
-            Some(Lock::acquire(&self.base.join("publication.lock"), true)?)
-        };
+        let _publication = Lock::acquire(&self.base.join("publication.lock"), true)?;
         println!("leased");
         std::io::stdout().flush()?;
         std::io::copy(&mut std::io::stdin(), &mut std::io::sink())?;
@@ -732,26 +643,12 @@ impl Node {
     pub fn dispatch(&self, args: &[String]) -> Result<Value> {
         fs::create_dir_all(&self.base)?;
         let op = arg(args, 0)?;
-        if op == "gc-coordinator" {
-            return self.hold_lease(true);
-        }
-        if op.starts_with("gc-") {
-            return self.gc_dispatch(args);
-        }
         if op == "connection" {
-            return self.connection(
-                arg(args, 1)? == "trusted",
-                args.get(2).is_some_and(|a| a == "runner"),
-            );
+            return self.connection(arg(args, 1)? == "trusted");
         }
         if op == "upgrade-mounts" {
             let _gate = Lock::acquire(&self.base.join("maintenance.lock"), false)?;
             let _clients = Lock::acquire(&self.base.join("clients.lock"), false)?;
-            ensure!(
-                !self.gc_active().exists(),
-                "resume GC before upgrading mounts"
-            );
-            stop_daemon()?;
             if self.base.join("ready").exists() {
                 fs::remove_file(self.base.join("ready"))?;
             }
@@ -775,36 +672,16 @@ impl Node {
             }
             return Ok(json!({"mounts_ready_for_recovery":true}));
         }
-        if op == "daemon" || op == "runner-daemon" {
-            return self.serve(op == "runner-daemon");
-        }
-        if op == "exec" {
-            // Lab namespace entry only. Native daemon connections and runtime
-            // roots provide protection; a shell wrapper must not hold a lease.
-            {
-                let _gate = Lock::acquire(&self.base.join("maintenance.lock"), true)?;
-                ensure!(
-                    !self.gc_active().exists() && self.base.join("ready").exists(),
-                    "store is paused or recovering"
-                );
-            }
-            return self.command(arg(args, 1)?, false, false, true);
+        if op == "runner-daemon" {
+            return self.serve();
         }
         if op == "recover" {
             let _gate = Lock::acquire(&self.base.join("maintenance.lock"), false)?;
-            ensure!(
-                !self.gc_active().exists(),
-                "cluster GC is paused; resume GC first"
-            );
             return self.recover();
         }
         // Internal native stdio copies and metadata operations also participate.
         let _gate = {
             let gate = Lock::acquire(&self.base.join("maintenance.lock"), true)?;
-            ensure!(
-                op == "resume-origin" || !self.gc_active().exists(),
-                "cluster GC is paused; rerun distributed-nix gc to resume it"
-            );
             if matches!(op, "stdio" | "origin-stdio") {
                 gate.inherit()?;
                 None
@@ -833,7 +710,7 @@ impl Node {
             "outbox" => self.outbox(),
             "acknowledge" => self.acknowledge(&args[1..]),
             "valid-paths" => crate::native::valid_paths(&self.root, &args[1..]),
-            "lease" => self.hold_lease(false),
+            "lease" => self.hold_lease(),
             "dump" | "dump-origin" => {
                 let root = if args[0] == "dump-origin" {
                     &self.origin
@@ -858,20 +735,14 @@ impl Node {
             "resume-origin" => self.resume_origin(),
             "reserve" | "commit" => self.publication(Path::new(arg(args, 1)?), args[0] == "commit"),
             "pin-local" => self.pin(&args[1..]),
-            "exec" => self.command(arg(args, 1)?, false, true, true),
-            "daemon" | "stdio" | "origin-stdio" => {
+            "stdio" | "origin-stdio" => {
                 let m = self.runtime()?;
                 let nix = m["nix"].as_str().context("nix runtime")?;
                 let origin = args[0] == "origin-stdio";
-                let stdio = args[0] != "daemon";
                 self.command(
-                    &format!(
-                        "{nix}/bin/nix daemon {} --store local?path-info-cache-size=0",
-                        if stdio { "--stdio" } else { "" }
-                    ),
+                    &format!("{nix}/bin/nix daemon --stdio --store local?path-info-cache-size=0"),
                     origin,
-                    stdio && !origin,
-                    false,
+                    !origin,
                 )
             }
             "receive" => {

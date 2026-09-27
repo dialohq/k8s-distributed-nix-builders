@@ -81,7 +81,6 @@ def drain(automatic=False, seconds=900):
         containers = json.loads(remote(host, "k3s crictl ps -o json"))["containers"]
         if any(c.get("labels", {}).get("io.kubernetes.pod.namespace") == NAMESPACE for c in containers):
             raise RuntimeError(f"Runner containers remain on {host}")
-        remote(host, "test -f /var/lib/distributed-nix/gc-maintenance-only")
     state["phase"] = "drained"
     durable(state)
     return state
@@ -90,7 +89,7 @@ def drain(automatic=False, seconds=900):
 def resume(state):
     config = json.loads(Path("/etc/distributed-nix/cluster.json").read_text())
     for host in config["nodes"]:
-        remote(host, "test ! -e /var/lib/distributed-nix/gc-active.json")
+        remote(host, "test ! -e /var/lib/distributed-nix/online-gc.json")
     for name, limits in state["sets"].items():
         kube("patch", "autoscalingrunnerset", name, "-n", NAMESPACE, "--type=merge",
              "-p", json.dumps({"spec": limits}))
@@ -108,13 +107,7 @@ def automatic_gc():
     if STATE.exists():
         print("Manual maintenance is active; automatic GC skipped", flush=True)
         return
-    print(run(["distributed-nix", "online-gc", "--if-needed"]), flush=True)
-
-
-def gc_git_caches():
-    config = json.loads(Path("/etc/distributed-nix/cluster.json").read_text())
-    for host in config["nodes"]:
-        remote(host, "cibox-git-cache gc")
+    print(run(["distributed-nix", "gc", "--if-needed"]), flush=True)
 
 
 def main():
@@ -122,8 +115,8 @@ def main():
         raise PermissionError("Run on cibox-0 as root")
     os.environ["KUBECONFIG"] = "/etc/rancher/k3s/k3s.yaml"
     command = sys.argv[1:]
-    if command not in (["drain"], ["resume"], ["gc"], ["gc", "--dry-run"], ["gc-offline"], ["gc-offline", "--dry-run"], ["auto-gc"]):
-        raise ValueError("Usage: cibox-maintenance drain | resume | gc [--dry-run] | gc-offline [--dry-run] | auto-gc")
+    if command not in (["drain"], ["resume"], ["gc"], ["gc", "--dry-run"], ["auto-gc"]):
+        raise ValueError("Usage: cibox-maintenance drain | resume | gc [--dry-run] | auto-gc")
     with (BASE / "arc-maintenance.lock").open("w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         if command == ["auto-gc"]:
@@ -133,15 +126,9 @@ def main():
             resume(json.loads(STATE.read_text()))
             return
         if command[0] == "gc":
-            print(run(["distributed-nix", "online-gc", *command[1:]]), flush=True)
+            print(run(["distributed-nix", "gc", *command[1:]]), flush=True)
             return
-        state = drain()
-        if command[0] == "gc-offline":
-            result = run(["distributed-nix", "gc-maintenance", *command[1:]])
-            print(result, flush=True)
-            if "--dry-run" not in command:
-                gc_git_caches()
-            resume(state)
+        drain()
 
 
 if __name__ == "__main__":

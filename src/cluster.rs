@@ -90,9 +90,6 @@ impl Cluster {
     pub fn remote(&self, node: usize, cmd: &str) -> Result<Output> {
         output(&mut self.ssh(node, cmd)?)
     }
-    pub fn remote_unchecked(&self, node: usize, cmd: &str) -> Result<Output> {
-        Ok(self.ssh(node, cmd)?.output()?)
-    }
     pub fn call(&self, node: usize, args: &[String]) -> Result<Output> {
         let mut words = vec![BIN.into(), "node".into()];
         words.extend_from_slice(args);
@@ -100,13 +97,6 @@ impl Cluster {
     }
     pub fn call_json(&self, node: usize, args: &[String]) -> Result<Value> {
         Ok(serde_json::from_slice(&self.call(node, args)?.stdout)?)
-    }
-    pub fn exec(&self, node: usize, cmd: &str) -> Result<Output> {
-        self.call(node, &["exec".into(), cmd.into()])
-    }
-    pub fn put(&self, node: usize, path: &str, data: &[u8]) -> Result<()> {
-        input(&mut self.ssh(node, &format!("cat > {}", sh(path)))?, data)?;
-        Ok(())
     }
     pub fn receive(&self, node: usize, m: &Manifest) -> Result<String> {
         let o = input(
@@ -169,7 +159,7 @@ impl Cluster {
         )
     }
     pub fn publish_to(&self, node: usize, paths: &[String], targets: &[usize]) -> Result<Value> {
-        let _lease = self.lease(false)?;
+        let _lease = self.lease()?;
         self.publish_inner(node, paths, targets)
     }
     fn publish_inner(&self, node: usize, paths: &[String], targets: &[usize]) -> Result<Value> {
@@ -186,7 +176,7 @@ impl Cluster {
         self.publish_manifest_inner(node, &m, targets, start)
     }
     pub fn publish_manifest(&self, node: usize, m: &Manifest, targets: &[usize]) -> Result<Value> {
-        let _lease = self.lease(false)?;
+        let _lease = self.lease()?;
         self.publish_manifest_inner(node, m, targets, Instant::now())
     }
     fn publish_manifest_inner(
@@ -267,7 +257,7 @@ impl Cluster {
         self.publish_to(node, paths, &[0, 1, 2])
     }
     pub fn reconcile(&self, id: &str) -> Result<Value> {
-        let _lease = self.lease(false)?;
+        let _lease = self.lease()?;
         ensure!(
             id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit()),
             "invalid batch ID"
@@ -292,29 +282,10 @@ impl Cluster {
         )?;
         Ok(result)
     }
-    pub fn build(&self, node: usize, args: &[String]) -> Result<Value> {
-        let _lease = self.lease(false)?;
-        let mut words = vec![
-            "nix".into(),
-            "build".into(),
-            "--impure".into(),
-            "--no-write-lock-file".into(),
-            "--no-link".into(),
-            "--print-out-paths".into(),
-        ];
-        words.extend_from_slice(args);
-        let o = self.exec(node, &join(&words))?;
-        eprint!("{}", String::from_utf8_lossy(&o.stderr));
-        let paths = String::from_utf8(o.stdout)?
-            .split_whitespace()
-            .map(String::from)
-            .collect::<Vec<_>>();
-        self.publish_inner(node, &paths, &[0, 1, 2])
-    }
 }
 
 /// An open SSH channel holds a kernel lock. Dropping it releases the lease;
-/// a coordinator crash never expires a worker's durable GC pause state.
+/// publication cannot overlap an online collection epoch.
 struct RemoteLease {
     child: std::process::Child,
 }
@@ -325,16 +296,11 @@ impl Drop for RemoteLease {
     }
 }
 impl Cluster {
-    fn lease(&self, coordinator: bool) -> Result<RemoteLease> {
+    fn lease(&self) -> Result<RemoteLease> {
         use std::io::BufRead;
         use std::process::Stdio;
-        let op = if coordinator {
-            "gc-coordinator"
-        } else {
-            "lease"
-        };
         let mut child = self
-            .ssh(0, &format!("{BIN} node {op}"))?
+            .ssh(0, &format!("{BIN} node lease"))?
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -347,108 +313,5 @@ impl Cluster {
             anyhow::bail!("origin lease refused; GC may be paused");
         }
         Ok(RemoteLease { child })
-    }
-    fn gc_input(&self, node: usize, op: &str, id: &str, v: &Value) -> Result<Value> {
-        let words = vec![BIN.into(), "node".into(), op.into(), id.into()];
-        Ok(serde_json::from_slice(
-            &input(&mut self.ssh(node, &join(&words))?, &serde_json::to_vec(v)?)?.stdout,
-        )?)
-    }
-    /// All online, quiescent participants or no deletion. Running again resumes
-    /// the origin's durable phase and never calculates a new plan after deletion.
-    pub fn gc(&self, dry: bool) -> Result<Value> {
-        self.gc_with_policy(dry, false)
-    }
-    /// Administrator-only entry point after all external store clients are drained.
-    pub fn gc_maintenance(&self, dry: bool) -> Result<Value> {
-        self.gc_with_policy(dry, true)
-    }
-    fn gc_with_policy(&self, dry: bool, maintenance: bool) -> Result<Value> {
-        let _coordinator = self.lease(true)?;
-        let status = self.call_json(0, &["gc-master".into(), "status".into()])?;
-        // Preflight before freezing anything when a worker is already offline.
-        self.parallel(|n| {
-            let op = if maintenance {
-                "gc-preflight-maintenance"
-            } else {
-                "gc-preflight"
-            };
-            let r = self.call_json(n, &[op.into()])?;
-            if !r["active"].is_null() {
-                ensure!(
-                    !status.is_null() && r["active"]["id"] == status["id"],
-                    "orphan or different GC epoch on worker {n}"
-                );
-            }
-            Ok(())
-        })?;
-        let mut master = self.call_json(
-            0,
-            &[
-                "gc-master".into(),
-                "begin".into(),
-                if dry { "dry".into() } else { "delete".into() },
-            ],
-        )?;
-        let id = master["id"].as_str().context("GC epoch")?.to_string();
-        let result = (|| -> Result<Value> {
-            if master["phase"] != "finish" {
-                // Origin first: excludes new publishers before draining workers.
-                for n in 0..3 {
-                    self.call(n, &["gc-freeze".into(), id.clone()])?;
-                }
-                if master.get("plan").is_none() {
-                    let mut snapshots = Vec::new();
-                    for n in 0..3 {
-                        snapshots.push(serde_json::from_value(
-                            self.call_json(n, &["gc-snapshot".into(), id.clone()])?,
-                        )?);
-                    }
-                    snapshots.push(serde_json::from_value(
-                        self.call_json(0, &["gc-snapshot".into(), id.clone(), "origin".into()])?,
-                    )?);
-                    let p = crate::gc::plan(&id, &snapshots)?;
-                    master = self.gc_input(0, "gc-master", "plan", &serde_json::to_value(p)?)?;
-                }
-                let plan = master["plan"].clone();
-                if !dry {
-                    for n in 0..3 {
-                        self.gc_input(n, "gc-plan", &id, &plan)?;
-                    }
-                    failpoint("gc-coordinator-after-plan");
-                    for n in 0..3 {
-                        self.call(n, &["gc-sweep".into(), id.clone(), n.to_string()])?;
-                    }
-                    failpoint("gc-coordinator-after-workers");
-                    // Every worker has durably retired its journals, unmounted
-                    // and unregistered dead paths before the origin can delete.
-                    self.call(0, &["gc-sweep".into(), id.clone(), "origin".into()])?;
-                }
-                master = self.call_json(0, &["gc-master".into(), "finish".into()])?;
-            }
-            for n in [1, 2, 0] {
-                self.call(n, &["gc-finish".into(), id.clone()])?;
-            }
-            let finished = self.call_json(0, &["gc-master".into(), "done".into()])?;
-            let p: crate::gc::Plan = serde_json::from_value(master["plan"].clone())?;
-            let mut bytes = 0u64;
-            if !dry {
-                for n in 0..3 {
-                    bytes += self.call_json(n, &["gc-report".into(), id.clone()])?["bytes_freed"]
-                        .as_u64()
-                        .context("GC bytes")?;
-                }
-            }
-            let r = json!({"id":id,"dry_run":dry,"kept":p.keep.len(),"worker_candidates":p.workers.iter().map(|s|s.len()).collect::<Vec<_>>(),"origin_candidates":p.origin.len(),"plan":p,"bytes_freed":bytes,"complete":finished["phase"]=="finish"});
-            durable(
-                &self
-                    .repo
-                    .join("results/distributed-nix")
-                    .join(format!("gc-{id}.json")),
-                &r,
-            )?;
-            Ok(r)
-        })();
-        result.with_context(||format!("GC epoch {id} interrupted; stores remain paused where necessary. Bring all nodes online and rerun distributed-nix gc{}",if dry{" --dry-run"}else{""}))
     }
 }

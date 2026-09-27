@@ -13,7 +13,6 @@
 #include "nix/store/realisation.hh"
 #include "nix/store/derivations.hh"
 #include <functional>
-#include <sqlite3.h>
 #include <memory>
 #include <thread>
 #include <sys/socket.h>
@@ -52,7 +51,6 @@ void pinClientPaths(const std::vector<std::string> & paths)
 // Every registration (build, source import, copy, substitution) gets an outbox
 // record BEFORE the native transaction. Invalid records are harmless and retryable.
 class SharedLocalStore : public nix::LocalStore {
-    std::thread::id owner = std::this_thread::get_id();
 public:
     explicit SharedLocalStore(nix::ref<const nix::LocalStoreConfig> config)
         : nix::Store(*config), nix::LocalFSStore(*config), nix::LocalStore(config) {}
@@ -104,82 +102,13 @@ public:
         nix::LocalStore::registerDrvOutput(info);
     }
 
-    void collectGarbage(const nix::GCOptions & options, nix::GCResults & results) override
-    {
-        // Never release a connection's activity lock from Nix's auto-GC thread
-        // while its main thread is still building. Explicit native GC is supported.
-        if (std::this_thread::get_id() != owner)
-            throw nix::Error("shared store requires explicit GC; configure min-free = 0");
-        if (options.ignoreLiveness) throw nix::Error("cannot ignore shared-store liveness");
-        std::vector<std::string> paths;
-        for (const auto & p : options.pathsToDelete) paths.push_back(printStorePath(p));
-        try {
-            auto r = runtime(2, {{"action", static_cast<int>(options.action)},
-                {"paths", paths}, {"max_freed", options.maxFreed}});
-            results.paths = r.at("paths").get<nix::PathSet>();
-            results.bytesFreed = r.at("bytes_freed").get<uint64_t>();
-        } catch (...) {
-            // A failed/resumable GC may leave this node frozen. This connection
-            // must never execute another request without its activity lock.
-            if (std::filesystem::exists("/run/distributed-nix/gc-active.json")) shutdown(0, SHUT_RDWR);
-            throw;
-        }
-    }
-};
-
-class CollectionStore : public nix::LocalStore {
-public:
-    explicit CollectionStore(nix::ref<const nix::LocalStoreConfig> config)
-        : nix::Store(*config), nix::LocalFSStore(*config), nix::LocalStore(config) {}
-
     void collectGarbage(const nix::GCOptions &, nix::GCResults &) override
     {
-        throw nix::Error("collection GC requires a drained collection");
+        throw nix::Error("shared store GC requires the administrator coordinator");
     }
 
-    void optimiseStore() override
-    {
-        throw nix::Error("collection optimisation requires a drained collection");
-    }
-
-    void repairPath(const nix::StorePath &) override
-    {
-        throw nix::Error("cannot repair a live shared collection");
-    }
-
-    void buildPaths(const std::vector<nix::DerivedPath> &, nix::BuildMode,
-        std::shared_ptr<nix::Store>) override
-    {
-        throw nix::Error("collection endpoint does not execute builds");
-    }
-
-    std::vector<nix::KeyedBuildResult> buildPathsWithResults(
-        const std::vector<nix::DerivedPath> &, nix::BuildMode, std::shared_ptr<nix::Store>) override
-    {
-        throw nix::Error("collection endpoint does not execute builds");
-    }
-
-    nix::BuildResult buildDerivation(const nix::StorePath &, const nix::BasicDerivation &,
-        nix::BuildMode) override
-    {
-        throw nix::Error("collection endpoint does not execute builds");
-    }
-
-    nix::StorePath addToStoreFromDump(nix::Source &, std::string_view,
-        nix::FileSerialisationMethod, nix::ContentAddressMethod, nix::HashAlgorithm,
-        const nix::StorePathSet &, nix::RepairFlag) override
-    {
-        throw nix::Error("collection uploads require path metadata");
-    }
-
-    void addToStore(const nix::ValidPathInfo & info, nix::Source & source,
-        nix::RepairFlag repair, nix::CheckSigsFlag checkSigs) override
-    {
-        if (repair != nix::NoRepair) throw nix::Error("cannot replace a live shared path");
-        nix::settings.fsyncStorePaths = true;
-        nix::LocalStore::addToStore(info, source, repair, checkSigs);
-    }
 };
+
 
 int reply(distributed_nix_buffer *out, std::string_view text, int status) noexcept
 {
@@ -215,51 +144,6 @@ nlohmann::json invoke(uint32_t op, const char *uri, const nlohmann::json &input)
         store->computeFSClosure(roots, closure);
         nix::copyPaths(*store, *target, closure, nix::NoRepair, nix::NoCheckSigs, nix::NoSubstitute);
         return {{"paths", closure.size()}};
-    }
-    if (op == 11) {
-        auto local = dynamic_cast<nix::LocalStore *>(&*store);
-        if (!local) throw nix::Error("snapshot requires a local store");
-        auto destination = input.get<std::string>();
-        auto dbDir = std::filesystem::path(destination) / "nix/var/nix/db";
-        if (std::filesystem::exists(destination)) throw nix::Error("snapshot destination exists");
-        std::filesystem::create_directories(dbDir);
-        auto open = [](const std::string & path, int flags) {
-            sqlite3 *raw = nullptr;
-            auto status = sqlite3_open_v2(path.c_str(), &raw, flags, nullptr);
-            std::unique_ptr<sqlite3, decltype(&sqlite3_close)> db(raw, sqlite3_close);
-            if (status != SQLITE_OK) throw nix::Error("open snapshot database: %s", sqlite3_errstr(status));
-            sqlite3_busy_timeout(db.get(), 10000);
-            return db;
-        };
-        {
-            auto source = open(local->dbDir + "/db.sqlite", SQLITE_OPEN_READONLY);
-            auto target = open((dbDir / "db.sqlite").string(), SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE);
-            auto backup = sqlite3_backup_init(target.get(), "main", source.get(), "main");
-            if (!backup) throw nix::Error("initialize snapshot: %s", sqlite3_errmsg(target.get()));
-            auto status = sqlite3_backup_step(backup, -1);
-            auto finished = sqlite3_backup_finish(backup);
-            if (status != SQLITE_DONE || finished != SQLITE_OK)
-                throw nix::Error("copy snapshot: %s", sqlite3_errmsg(target.get()));
-        }
-        std::filesystem::copy_file(local->schemaPath, dbDir / "schema");
-        auto snapshot = nix::openStore(destination);
-        nlohmann::json paths = nlohmann::json::array();
-        for (const auto & path : snapshot->queryAllValidPaths()) paths.push_back(snapshot->printStorePath(path));
-        return {{"version", 1}, {"paths", paths}};
-    }
-    if (op == 10) {
-        nlohmann::json result = {{"version", 1}, {"paths", nlohmann::json::object()},
-            {"roots", nlohmann::json::array()}, {"realisations", nlohmann::json::object()}};
-        for (const auto & path : store->queryAllValidPaths()) {
-            auto name = store->printStorePath(path);
-            result["roots"].push_back(name);
-            result["paths"][name] = store->queryPathInfo(path)->toJSON(&store->config, true, nix::PathInfoJsonFormat::V1);
-        }
-        std::set<nix::Realisation> records;
-        for (const auto & value : invoke(8, uri, nullptr)) records.insert(value.get<nix::Realisation>());
-        for (const auto & record : nix::Realisation::closure(*store, records))
-            result["realisations"][record.id.to_string()] = record;
-        return result;
     }
     if (op == 9) {
         auto result = input;
@@ -481,25 +365,5 @@ extern "C" int distributed_nix_serve_v1(int trusted, distributed_nix_buffer *res
         return reply(result, e.what(), 1);
     } catch (...) {
         return reply(result, "unknown exception in native daemon", 1);
-    }
-}
-
-extern "C" int distributed_nix_serve_store_v1(const char *uri, int trusted, distributed_nix_buffer *result) noexcept
-{
-    if (!result) return 2;
-    *result = {nullptr, 0};
-    if (!uri) return reply(result, "null store URI", 2);
-    try {
-        std::call_once(initialized, [] { nix::initNix(); });
-        auto local = nix::openStore(uri).dynamic_pointer_cast<nix::LocalStore>();
-        if (!local) throw nix::Error("collection requires a local store");
-        auto store = nix::make_ref<CollectionStore>(local->config);
-        nix::daemon::processConnection(store, nix::FdSource(0), nix::FdSink(1),
-            trusted ? nix::Trusted : nix::NotTrusted, nix::daemon::NotRecursive);
-        return 0;
-    } catch (const std::exception & e) {
-        return reply(result, e.what(), 1);
-    } catch (...) {
-        return reply(result, "unknown exception in native collection daemon", 1);
     }
 }

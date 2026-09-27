@@ -25,12 +25,6 @@ fn native_transaction_roundtrip_conflict_and_concurrent_calls() -> Result<()> {
         paths.push(String::from_utf8(out.stdout)?.trim().to_string());
     }
     let manifest = native::dump(&source, &paths)?;
-    let catalog = native::catalog(&source)?;
-    ensure!(
-        catalog.paths == manifest.paths,
-        "catalog changed native metadata"
-    );
-    ensure!(catalog.roots.len() == paths.len(), "catalog omitted a path");
     ensure!(
         manifest.paths.len() == 2,
         "expected two real native records"
@@ -70,65 +64,6 @@ fn native_transaction_roundtrip_conflict_and_concurrent_calls() -> Result<()> {
     ensure!(
         result.realisations == ca.realisations,
         "CA dependency closure was not preserved"
-    );
-    let snapshot = tmp.path().join("snapshot");
-    let metadata = native::snapshot(&target, &snapshot)?;
-    ensure!(
-        metadata["paths"].as_array().unwrap().len() == paths.len(),
-        "snapshot omitted paths"
-    );
-    for path in &paths {
-        fs::copy(
-            target.join(path.trim_start_matches('/')),
-            snapshot.join(path.trim_start_matches('/')),
-        )?;
-    }
-    let restored = native::dump_realisations(&snapshot, &[ca.realisations[&ids[1]].clone()])?;
-    ensure!(
-        restored["manifest"]["realisations"] == serde_json::to_value(&ca.realisations)?,
-        "snapshot lost CA records"
-    );
-    ensure!(
-        native::snapshot(&target, &snapshot).is_err(),
-        "snapshot overwrote an existing store"
-    );
-    let private = tmp.path().join("private-snapshot");
-    fs::create_dir_all(private.join("nix/var/nix/db"))?;
-    fs::create_dir_all(private.join("nix/store"))?;
-    for name in ["db.sqlite", "schema"] {
-        fs::copy(
-            snapshot.join("nix/var/nix/db").join(name),
-            private.join("nix/var/nix/db").join(name),
-        )?;
-    }
-    for path in &paths {
-        fs::copy(
-            target.join(path.trim_start_matches('/')),
-            private.join(path.trim_start_matches('/')),
-        )?;
-    }
-    let private_ca = native::dump_realisations(&private, &[ca.realisations[&ids[1]].clone()])?;
-    ensure!(
-        private_ca["manifest"]["realisations"] == serde_json::to_value(&ca.realisations)?,
-        "standalone database copy lost CA records"
-    );
-    let new_input = tmp.path().join("private-input");
-    fs::write(&new_input, "only this builder owns this input")?;
-    let added = output(
-        Command::new("nix-store")
-            .args(["--option", "build-users-group", "", "--store"])
-            .arg(&private)
-            .arg("--add")
-            .arg(&new_input),
-    )?;
-    let added = String::from_utf8(added.stdout)?.trim().to_string();
-    ensure!(
-        native::valid_paths(&target, &[added.clone()])? == json!([]),
-        "private write modified origin metadata"
-    );
-    ensure!(
-        native::valid_paths(&snapshot, &[added])? == json!([]),
-        "private write modified snapshot metadata"
     );
     let mut conflict = ca.clone();
     conflict.realisations.get_mut(&ids[0]).unwrap()["outPath"] =

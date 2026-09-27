@@ -1,6 +1,6 @@
 # Online shared-store collection
 
-`distributed-nix online-gc` runs on the origin node. `--dry-run` reports a plan;
+`distributed-nix gc` runs on the origin node. `--dry-run` reports a plan;
 `--if-needed` collects only under disk pressure, or resumes an interrupted epoch.
 The ARC maintenance wrapper's `gc` and `auto-gc` commands use this protocol.
 Runners remain scheduled and native Nix builds continue.
@@ -36,7 +36,7 @@ Epochs and barriers survive crashes. Rerun the same command to resume; never
 remove a retirement marker manually. Missing nodes prevent origin deletion.
 After interruption, affected path requests can remain blocked until recovery,
 but unrelated builds can proceed. There is no timed expiry of safety state.
-Upgrades and the explicit `gc-offline` repair path still use drained maintenance.
+GC has one mode: online collection. Drained maintenance is only for upgrades.
 
 Local tests cover root/lease lifetime, late remote roots, retirement waits,
 immutable plans, admission checkpoint recovery, authentication, and native

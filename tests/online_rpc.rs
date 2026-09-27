@@ -1,8 +1,8 @@
 use anyhow::{Result, ensure};
 use distributed_nix::{
     node::Node,
+    online_rpc::wire::{GcRequest, online_gc_client::OnlineGcClient},
     online_rpc::{Config, Service, serve},
-    rpc::wire::{GcRequest, online_gc_client::OnlineGcClient},
     util::durable,
 };
 use serde_json::json;

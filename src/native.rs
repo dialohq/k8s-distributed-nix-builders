@@ -27,11 +27,6 @@ unsafe extern "C" {
         result: *mut Buffer,
     ) -> i32;
     fn distributed_nix_buffer_free_v1(buffer: *mut Buffer);
-    fn distributed_nix_serve_store_v1(
-        store: *const c_char,
-        trusted: i32,
-        result: *mut Buffer,
-    ) -> i32;
     fn distributed_nix_serve_v1(trusted: i32, result: *mut Buffer) -> i32;
 }
 impl Drop for Buffer {
@@ -143,9 +138,7 @@ pub fn realisation_conflicts(root: &Path, manifest: &Manifest) -> Result<Value> 
 pub fn scan_realisations(root: &Path) -> Result<Vec<Value>> {
     Ok(serde_json::from_value(call(8, root, b"null")?)?)
 }
-pub fn catalog(root: &Path) -> Result<Manifest> {
-    Manifest::parse(call(10, root, b"null")?)
-}
+
 pub fn serve(trusted: bool) -> Result<()> {
     let mut result = Buffer {
         data: std::ptr::null_mut(),
@@ -225,10 +218,6 @@ mod tests {
     }
 }
 
-pub fn snapshot(root: &Path, destination: &Path) -> Result<Value> {
-    call(11, root, &serde_json::to_vec(destination)?)
-}
-
 pub fn copy(root: &Path, target: &str, paths: &[String]) -> Result<Value> {
     ensure!(
         !paths.is_empty() && paths.iter().all(|p| valid_path(p)),
@@ -239,30 +228,6 @@ pub fn copy(root: &Path, target: &str, paths: &[String]) -> Result<Value> {
         root,
         &serde_json::to_vec(&serde_json::json!({"target":target,"paths":paths}))?,
     )
-}
-
-pub fn serve_store(root: &Path) -> Result<()> {
-    let uri = CString::new(root.as_os_str().as_bytes())?;
-    let mut result = Buffer {
-        data: std::ptr::null_mut(),
-        len: 0,
-    };
-    let status = unsafe { distributed_nix_serve_store_v1(uri.as_ptr(), 1, &mut result) };
-    ensure!(
-        result.len <= isize::MAX as usize,
-        "oversized native server reply"
-    );
-    if status != 0 {
-        let detail = if result.len == 0 {
-            String::new()
-        } else {
-            ensure!(!result.data.is_null(), "null native server reply");
-            String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(result.data, result.len) })
-                .into_owned()
-        };
-        bail!("native collection daemon: {detail}");
-    }
-    Ok(())
 }
 
 pub fn online_snapshot(root: &Path) -> Result<Value> {

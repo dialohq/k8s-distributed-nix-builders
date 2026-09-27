@@ -33,7 +33,6 @@ void distributed_nix_buffer_free_v1(struct distributed_nix_buffer *buffer) DISTR
  * stdin/stdout. callback buffers use malloc/free, just like the bridge buffers.
  * callback op 1 durably enqueues registration; op 2 coordinates cluster GC. */
 int distributed_nix_serve_v1(int trusted, struct distributed_nix_buffer *result) DISTRIBUTED_NIX_NOEXCEPT;
-int distributed_nix_serve_store_v1(const char *store, int trusted, struct distributed_nix_buffer *result) DISTRIBUTED_NIX_NOEXCEPT;
 int distributed_nix_runtime_v1(uint32_t operation, const unsigned char *input,
     size_t input_len, struct distributed_nix_buffer *result);
 #ifdef __cplusplus

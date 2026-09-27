@@ -13,7 +13,7 @@ sha2 = "0.10"
 tempfile = "3"
 rusqlite = { version = "0.37", default-features = false }
 
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "process", "signal", "time"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "time"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 tonic = "0.14"
 tonic-prost = "0.14"

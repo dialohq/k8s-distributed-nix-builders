@@ -2,7 +2,7 @@
 use crate::{
     gc::{Plan, Snapshot, plan, remove_file},
     node::Node,
-    rpc::wire::{
+    online_rpc::wire::{
         GcReply, GcRequest,
         online_gc_client::OnlineGcClient,
         online_gc_server::{OnlineGc, OnlineGcServer},
@@ -269,10 +269,6 @@ pub async fn collect(
     // These file locks are held by this dedicated CLI, not by the RPC servers.
     let _coordinator = Lock::acquire(&node.base.join("gc-coordinator.lock"), false)?;
     let _publication = Lock::acquire(&node.base.join("publication.lock"), false)?;
-    ensure!(
-        !node.base.join("gc-master.json").exists(),
-        "resume offline GC first"
-    );
     let file = node.base.join("online-master.json");
     let mut state = if file.exists() {
         ensure!(!dry, "resume active epoch before preview");
@@ -376,4 +372,8 @@ pub async fn collect(
     durable(&node.gc_epoch(&id)?.join("online-complete.json"), &state)?;
     remove_file(&file)?;
     Ok(state)
+}
+
+pub mod wire {
+    tonic::include_proto!("distributed_nix.v1");
 }

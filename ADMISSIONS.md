@@ -100,6 +100,5 @@ ADMISSIONS_BENCH_DIRECTORY=/absolute/path/to/private-copy \
   nix develop -c cargo test --release --test admissions benchmark_legacy_history -- --ignored --nocapture
 ```
 
-The older three-VM cluster tests have been updated for SQLite inspection, but
-were not rerun in this change. Production NFS, ARC workflow convergence, and
-disruptive three-node GC/reboot measurements remain rollout checks.
+The cluster deployment suite covers native NFS reuse, ARC workflow convergence,
+online collection failures and retries, and node reboot recovery.

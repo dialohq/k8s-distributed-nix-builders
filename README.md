@@ -10,7 +10,7 @@ Share a Nix package collection between Kubernetes build nodes while keeping Nix 
 - A separate local SQLite database tracks admission plans and crash recovery. No live SQLite database is shared over NFS.
 - Online GC keeps builds running, tracks pod-lifetime roots, removes dead worker mounts before shared files, and resumes interrupted epochs. See [ONLINE_GC.md](ONLINE_GC.md).
 
-This is an early implementation, not a drop-in Kubernetes operator. The coordinator uses fixed three-node membership. Online GC uses authenticated gRPC; publication still uses SSH. Build clients use the ordinary Nix daemon protocol. The optional gRPC/private-builder prototype is not the deployed lifecycle; see [RPC.md](RPC.md) and [EPHEMERAL.md](EPHEMERAL.md).
+This is an early implementation, not a drop-in Kubernetes operator. The coordinator uses fixed three-node membership. Online GC uses authenticated gRPC; publication still uses SSH. Build clients use the ordinary Nix daemon protocol.
 
 The Rust process owns coordination, admission, mount management, and recovery. A C ABI wrapper calls the native Nix C++ implementation for store metadata and daemon operations. Nix is pinned to **2.33.6** because that integration is version-sensitive. The current deployment targets Linux x86-64.
 
@@ -22,13 +22,13 @@ nix flake check
 nix develop -c cargo test
 ```
 
-The package build runs unit tests and tests against real native Nix stores, including RPC streaming and database/admission failure recovery. Privileged mount tests run separately:
+The package build runs unit tests and tests against real native Nix stores, including authenticated GC coordination and database/admission failure recovery. Privileged mount tests run separately:
 
 ```sh
 sudo nix develop -c cargo test --test admissions mounted_paths -- --ignored --nocapture
 ```
 
-Historical three-machine lab tests are opt-in and need their lab setup. An ignored test is not counted as a passing integration test.
+Cluster deployment tests exercise the actual ARC pod templates. The retired host-daemon and offline-GC lab suites have been removed.
 
 ## Deployment integration
 

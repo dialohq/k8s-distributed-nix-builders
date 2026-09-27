@@ -1,6 +1,6 @@
 fn main() {
-    tonic_prost_build::compile_protos("proto/collection.proto").expect("compile collection RPC schema");
-    println!("cargo:rerun-if-changed=proto/collection.proto");
+    tonic_prost_build::compile_protos("proto/gc.proto").expect("compile GC RPC schema");
+    println!("cargo:rerun-if-changed=proto/gc.proto");
     println!("cargo:rerun-if-changed=native/nix_bridge.cc");
     println!("cargo:rerun-if-changed=native/nix_bridge.h");
     let mut cpp = cc::Build::new();
@@ -10,7 +10,7 @@ fn main() {
     }
     cpp.cpp(true).std("c++23").file("native/nix_bridge.cc");
     // Compile first, then emit dynamic Nix link libraries after the static shim.
-    for package in ["nix-main", "nix-store", "nlohmann_json", "sqlite3"] {
+    for package in ["nix-main", "nix-store", "nlohmann_json"] {
         let lib = pkg_config::Config::new()
             .cargo_metadata(false)
             .probe(package)
@@ -23,7 +23,7 @@ fn main() {
         }
     }
     cpp.compile("distributed_nix_bridge");
-    for package in ["nix-main", "nix-store", "sqlite3"] {
+    for package in ["nix-main", "nix-store"] {
         pkg_config::Config::new()
             .probe(package)
             .expect("Nix libraries");

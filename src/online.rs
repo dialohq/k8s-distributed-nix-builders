@@ -78,13 +78,9 @@ impl RootGroup {
     }
 }
 
-pub fn native_group(root: &Path, runner: bool) -> Result<RootGroup> {
-    let pod = if runner {
-        Some(std::env::var("CIBOX_POD_UID").context("runner requires CIBOX_POD_UID")?)
-    } else {
-        None
-    };
-    group(Path::new(BASE), root, pod.as_deref())
+pub fn native_group(root: &Path) -> Result<RootGroup> {
+    let pod = std::env::var("CIBOX_POD_UID").context("runner requires CIBOX_POD_UID")?;
+    group(Path::new(BASE), root, Some(&pod))
 }
 
 fn retiring(base: &Path, paths: &[String]) -> Result<bool> {
@@ -274,7 +270,6 @@ impl Node {
         all_pods: &BTreeSet<String>,
     ) -> Result<Value> {
         valid_id(id)?;
-        ensure!(!self.gc_active().exists(), "offline GC is active");
         ensure!(
             self.base.join("ready").exists(),
             "store recovery incomplete"
@@ -362,7 +357,6 @@ impl Node {
     pub fn online_prepare(&self, plan: &Plan) -> Result<Value> {
         plan.validate()?;
         let _gate = Lock::acquire(&self.base.join("online-roots.lock"), false)?;
-        ensure!(!self.gc_active().exists(), "offline GC active");
         let epoch = self.gc_epoch(&plan.id)?;
         let active = self.base.join("online-gc.json");
         if active.exists() {

@@ -35,17 +35,3 @@ fn missing_node_and_malformed_or_self_conflicting_plan_fail_closed() {
     p.origin.insert("/etc/passwd".into());
     assert!(p.validate().is_err());
 }
-
-#[test]
-fn maintenance_policy_rejects_normal_gc_before_freezing() {
-    let dir = tempfile::tempdir().unwrap();
-    let node = distributed_nix::node::Node {
-        base: dir.path().into(),
-        ..Default::default()
-    };
-    std::fs::write(dir.path().join("gc-maintenance-only"), "ARC\n").unwrap();
-    let error = node.dispatch(&["gc-preflight".into()]).unwrap_err();
-    assert!(error.to_string().contains("administrator coordinator"));
-    assert!(!dir.path().join("gc-active.json").exists());
-    assert!(node.dispatch(&["gc-preflight-maintenance".into()]).is_ok());
-}

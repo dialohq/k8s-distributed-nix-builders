@@ -1,0 +1,14 @@
+syntax = "proto3";
+package distributed_nix.v1;
+
+// Administrative collection only; this endpoint cannot execute commands.
+service OnlineGC {
+  rpc Preflight(GCRequest) returns (GCReply);
+  rpc Snapshot(GCRequest) returns (GCReply);
+  rpc Prepare(GCRequest) returns (GCReply);
+  rpc Plan(GCRequest) returns (GCReply);
+  rpc Sweep(GCRequest) returns (GCReply);
+  rpc Finish(GCRequest) returns (GCReply);
+}
+message GCRequest { string epoch = 1; bool origin = 2; bytes plan_json = 3; }
+message GCReply { bytes json = 1; }
