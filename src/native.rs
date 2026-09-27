@@ -135,6 +135,11 @@ pub fn valid_paths(root: &Path, paths: &[String]) -> Result<Value> {
 pub fn dump_realisations(root: &Path, pending: &[Value]) -> Result<Value> {
     call(7, root, &serde_json::to_vec(pending)?)
 }
+
+pub fn realisation_conflicts(root: &Path, manifest: &Manifest) -> Result<Value> {
+    manifest.validate()?;
+    call(13, root, &serde_json::to_vec(&manifest.realisations)?)
+}
 pub fn scan_realisations(root: &Path) -> Result<Vec<Value>> {
     Ok(serde_json::from_value(call(8, root, b"null")?)?)
 }

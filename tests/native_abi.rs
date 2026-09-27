@@ -150,6 +150,18 @@ fn native_transaction_roundtrip_conflict_and_concurrent_calls() -> Result<()> {
             "signatures": [], "dependentRealisations": {},
         }),
     );
+    let detected: Vec<String> =
+        serde_json::from_value(native::realisation_conflicts(&target, &conflict)?)?;
+    ensure!(detected.contains(&ids[0]) && !detected.contains(&independent_id));
+    let blocked = conflict.blocked_realisations([ids[0].clone()].into_iter().collect())?;
+    ensure!(
+        blocked.contains(&ids[1]) && !blocked.contains(&independent_id),
+        "conflict dependency propagation failed"
+    );
+    ensure!(
+        native::realisation_conflicts(&target, &ca)? == json!([]),
+        "compatible mappings rejected"
+    );
     let independent = conflict.realisation_closure(&[independent_id.clone()])?;
     ensure!(independent.paths.len() == 1 && independent.realisations.len() == 1);
     native::register(&target, &independent)?;

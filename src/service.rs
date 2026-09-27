@@ -405,34 +405,34 @@ impl Cluster {
         let manifest = Manifest::parse(ca["manifest"].clone())?;
         let ready = serde_json::from_value::<Vec<String>>(ca["ready"].clone())?;
         ensure!(!ready.is_empty(), "CA manifest has no ready records");
-        let mut pending = vec![ready];
+        let reports = self.parallel(|target| {
+            let file = self.receive(target, &manifest)?;
+            self.call_json(target, &["realisation-conflicts".into(), file])
+        })?;
+        let mut conflicts = std::collections::BTreeSet::new();
+        for report in &reports {
+            for role in ["worker", "origin"] {
+                conflicts.extend(serde_json::from_value::<Vec<String>>(report[role].clone())?);
+            }
+        }
+        let blocked = manifest.blocked_realisations(conflicts)?;
         let mut rows = Vec::new();
-        while let Some(ids) = pending.pop() {
-            if !pending.is_empty() {
-                rows.extend(self.publish_paths_pending()?);
+        if !blocked.is_empty() {
+            rows.push(json!({"node":node,"error":"conflicting realisations; queued with roots retained", "blocked":blocked, "conflicts":reports}));
+        }
+        let ready: Vec<_> = ready
+            .into_iter()
+            .filter(|id| !blocked.contains(id))
+            .collect();
+        if !ready.is_empty() {
+            let subset = manifest.realisation_closure(&ready)?;
+            let publication = self.publish_manifest(node, &subset, &[0, 1, 2])?;
+            for batch in ready.chunks(128) {
+                let mut args = vec!["ca-acknowledge".into()];
+                args.extend_from_slice(batch);
+                self.call(node, &args)?;
             }
-            let subset = manifest.realisation_closure(&ids)?;
-            match self.publish_manifest(node, &subset, &[0, 1, 2]) {
-                Ok(publication) => {
-                    for batch in ids.chunks(128) {
-                        let mut args = vec!["ca-acknowledge".into()];
-                        args.extend_from_slice(batch);
-                        self.call(node, &args)?;
-                    }
-                    rows.push(publication);
-                }
-                Err(error)
-                    if ids.len() > 1
-                        && format!("{error:#}").contains("conflicting realisation") =>
-                {
-                    let middle = ids.len() / 2;
-                    pending.push(ids[middle..].to_vec());
-                    pending.push(ids[..middle].to_vec());
-                }
-                Err(error) => {
-                    rows.push(json!({"node":node,"realisations":ids,"error":format!("{error:#}")}))
-                }
-            }
+            rows.push(publication);
         }
         Ok(rows)
     }

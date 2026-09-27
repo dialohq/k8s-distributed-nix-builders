@@ -152,10 +152,20 @@ int reply(distributed_nix_buffer *out, std::string_view text, int status) noexce
 
 nlohmann::json invoke(uint32_t op, const char *uri, const nlohmann::json &input)
 {
-    if (op < DISTRIBUTED_NIX_DUMP || op > 12)
+    if (op < DISTRIBUTED_NIX_DUMP || op > 13)
         throw std::invalid_argument("unknown Nix bridge operation");
     std::call_once(initialized, [] { nix::initNix(); });
     auto store = nix::openStore(uri);
+    if (op == 13) {
+        nlohmann::json conflicts = nlohmann::json::array();
+        for (const auto & [id, value] : input.items()) {
+            auto record = value.get<nix::Realisation>();
+            if (id != record.id.to_string()) throw nix::Error("realisation ID mismatch");
+            if (auto old = store->queryRealisation(record.id); old && !record.isCompatibleWith(*old))
+                conflicts.push_back(id);
+        }
+        return conflicts;
+    }
     if (op == 12) {
         auto target = nix::openStore(input.at("target").get<std::string>());
         nix::StorePathSet roots, closure;

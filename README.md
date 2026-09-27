@@ -36,7 +36,7 @@ Consume `packages.x86_64-linux.default` from a pinned flake input. Use the same 
 
 Cluster-specific NixOS modules, inventory, encrypted credentials, ARC Helm values, and GitOps manifests belong in the deploying infrastructure repository. None are included here. Configuration paths and commands are listed by `distributed-nix --help`.
 
-Conflicting content-addressed realisations remain errors and retain their pending roots. The publisher handles ordinary paths separately and splits conflicting realisation batches so unrelated outputs can converge. This does not make nondeterministic derivations reproducible or resolve their conflicting mappings.
+Conflicting content-addressed realisations remain errors and retain their pending roots. The publisher handles ordinary paths separately and checks native mappings on every participant before publishing realisations. Conflicting mappings and their dependents stay queued while unrelated outputs converge. This does not make nondeterministic derivations reproducible or resolve their conflicting mappings.
 
 The current model requires trusted builders and privileged mount operations. The shared filesystem must retain the published data while any participant still references it; a missing participant prevents GC. A single NFS origin is not highly available.
 

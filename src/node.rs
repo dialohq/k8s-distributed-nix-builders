@@ -797,6 +797,16 @@ impl Node {
             "ca-outbox" => self.ca_outbox(),
             "ca-acknowledge" => self.ca_acknowledge(&args[1..]),
             "ca-backfill" => self.ca_backfill(),
+            "realisation-conflicts" => {
+                let manifest = Manifest::read(Path::new(arg(args, 1)?))?;
+                let worker = crate::native::realisation_conflicts(&self.root, &manifest)?;
+                let origin = if self.origin.join("nix/var/nix/db/db.sqlite").exists() {
+                    crate::native::realisation_conflicts(&self.origin, &manifest)?
+                } else {
+                    json!([])
+                };
+                Ok(json!({"worker":worker,"origin":origin}))
+            }
             "canonical-manifest" => Ok(serde_json::to_value(crate::native::canonical_manifest(
                 &self.origin,
                 &Manifest::read(Path::new(arg(args, 1)?))?,

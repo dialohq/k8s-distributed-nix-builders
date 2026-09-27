@@ -157,4 +157,23 @@ impl Manifest {
         result.validate()?;
         Ok(result)
     }
+
+    pub fn blocked_realisations(&self, mut blocked: BTreeSet<String>) -> Result<BTreeSet<String>> {
+        loop {
+            let previous = blocked.len();
+            for (id, record) in &self.realisations {
+                if record["dependentRealisations"]
+                    .as_object()
+                    .context("realisation dependencies")?
+                    .keys()
+                    .any(|dep| blocked.contains(dep))
+                {
+                    blocked.insert(id.clone());
+                }
+            }
+            if blocked.len() == previous {
+                return Ok(blocked);
+            }
+        }
+    }
 }
