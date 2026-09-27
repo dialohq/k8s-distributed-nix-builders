@@ -29,5 +29,6 @@ and verifies publication lease release. Helm lint and the authenticated Helm tes
 hook passed. Chart rendering was checked with one and five builder members.
 
 `.github/workflows/helm.yaml` runs the same deployment test in kind on Ubuntu,
-including multiple independent builder PVCs on one Kubernetes node. Its result
-is recorded in GitHub Actions; do not infer a pass from the three-node test above.
+including multiple independent builder PVCs on one Kubernetes node. It passed on Ubuntu in [run 36338175220](https://github.com/dialohq/k8s-distributed-nix-builders/actions/runs/36338175220):
+all eight checks passed in 117.48 seconds after installation. The Helm test hook
+also passed. This provides an independent non-NixOS deployment check.
