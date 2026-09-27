@@ -1,7 +1,19 @@
 name: Helm Kubernetes E2E
-on: [push, pull_request, workflow_dispatch]
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the tested image and Helm chart to GHCR
+        type: boolean
+        default: false
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
 permissions:
   contents: read
+  packages: write
 jobs:
   kind:
     runs-on: ubuntu-24.04
@@ -39,3 +51,15 @@ jobs:
           for pod in $(kubectl get pods -n nix-builders -o name); do
             kubectl logs -n nix-builders "$pod" --all-containers --tail=100 || true
           done
+      - name: Publish tested image and Helm chart
+        if: github.event_name == 'workflow_dispatch' && inputs.publish
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        run: |
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GHCR_USER" --password-stdin
+          printf '%s' "$GHCR_TOKEN" | helm registry login ghcr.io --username "$GHCR_USER" --password-stdin
+          docker load --input "$(readlink -f image)"
+          docker push ghcr.io/dialohq/k8s-distributed-nix-builders:0.3.0
+          helm package deploy/chart --destination /tmp
+          helm push /tmp/k8s-distributed-nix-builders-0.3.0.tgz oci://ghcr.io/dialohq/charts
