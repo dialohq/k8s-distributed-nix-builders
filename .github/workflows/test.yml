@@ -17,3 +17,5 @@ jobs:
       - run: nix flake check -L
       - name: Privileged mount recovery
         run: sudo "$(command -v nix)" --option build-users-group '' develop path:. -c cargo test --test admissions mounted_paths -- --ignored --nocapture
+      - name: Privileged ARC process cleanup
+        run: sudo "$(command -v nix)" --option build-users-group '' develop path:. -c cargo test --test runner_cgroup -- --ignored --nocapture
