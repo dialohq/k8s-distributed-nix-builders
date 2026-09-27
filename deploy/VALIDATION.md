@@ -1,5 +1,28 @@
 # Portable deployment validation
 
+## ARC release 0.4.0
+
+The [native and privileged tests](https://github.com/dialohq/k8s-distributed-nix-builders/actions/runs/36351582469)
+and [Helm release workflow](https://github.com/dialohq/k8s-distributed-nix-builders/actions/runs/36351586577)
+passed for commit `ce3aa682589c10406407c1524dafb70c390d02f4`. The latter adds a real
+unprivileged ARC client and GitHub runner failure/cleanup test to the ten existing
+Kubernetes checks. The privileged process test verifies cleanup of a detached
+child using kernel cgroup events, without elapsed-time assertions.
+
+On Cibox, actual default-ARC [main.yml](https://github.com/dialohq/dialo/actions/runs/36352536278)
+and [C++ build/reuse/shell validation](https://github.com/dialohq/dialo/actions/runs/36352537773)
+passed on OpenEBS LVM PVCs. Deleting an idle ARC pod released its cgroup, workspace
+and native root lease; online GC then pruned its root group. These live tests are
+additional to the vanilla kind tests. CI application pods have no hostPath mounts.
+
+Published artifacts:
+
+- Generic image `:0.4.0`: `sha256:e7d952c4d8081f03b3e073855f5378d435a36ec24646f4f674fc4efea91a2a1d`.
+- ARC builder image `:0.4.0-arc`: `sha256:0bf2db5d4f01495359c51662b557c3cb1820af5a0e17631511d6693cc1188ff7`.
+- Helm chart `0.4.0`: `sha256:e072783222a8ddd29b3252e72baab2dfb6d252bc411a06a4db15e439998cff3b`.
+
+## Earlier pool validation
+
 Version `0.3.2` passed **42 native tests** and all **10 Kubernetes checks in
 75.36 seconds** on the three-node OpenEBS LVM cluster. The added check replaces a
 cached NFS directory ten times and immediately admits each replacement through
