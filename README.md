@@ -1,18 +1,53 @@
 # k8s-distributed-nix-builders
 
-Share a Nix package collection between Kubernetes build nodes while keeping Nix metadata on local storage. Designed to complement GitHub Actions Runner Controller (ARC): ordinary Nix commands run inside a builder sidecar, runners are disposable, and CI store state survives runner replacement.
+A shared Nix package collection for Kubernetes, with private native Nix databases for each warm builder. Rust coordinates publication and online GC; a C ABI wrapper calls native Nix C++ store operations. Ordinary `nix build` commands run inside builder pods.
+
+## Install with Helm
+
+Build and publish/load the OCI image before installation:
+
+```sh
+nix build .#image
+# Load result into your cluster's container runtime, or publish it to your registry.
+helm upgrade --install nix-builders ./deploy/chart \
+  --namespace nix-builders --create-namespace \
+  --set image.repository=YOUR_REGISTRY/k8s-distributed-nix-builders \
+  --set image.tag=portable \
+  --set store.storageClass=YOUR_BLOCK_STORAGE_CLASS \
+  --set builders.storageClass=YOUR_BLOCK_STORAGE_CLASS
+helm test nix-builders --namespace nix-builders
+kubectl exec -n nix-builders -it nix-builders-nix-builder-0 -- nix --version
+```
+
+Package the chart with `helm package deploy/chart`. For GitOps, create a Secret containing a 32–256 byte `token` key and set `auth.existingSecret` to its name; otherwise Helm generates and preserves the token on upgrade. Never commit a real token in values files.
+
+The chart creates one store StatefulSet, a three-member warm builder StatefulSet, Services, a NetworkPolicy, and PVCs. CPU and memory requests guide scheduling; there are no resource limits by default. See [values.yaml](deploy/chart/values.yaml).
 
 ## Architecture
 
-- Each node has a persistent CI store view and native Nix database, separate from its host Nix store.
-- Builder sidecars speak the native Nix daemon protocol over a pod-local Unix socket.
-- A coordinator publishes completed paths into a shared POSIX collection, currently deployed over read-only NFS. Native Nix transfers and registers metadata.
-- A separate local SQLite database tracks admission plans and crash recovery. No live SQLite database is shared over NFS.
-- Online GC keeps builds running, tracks pod-lifetime roots, removes dead worker mounts before shared files, and resumes interrupted epochs. See [ONLINE_GC.md](ONLINE_GC.md).
+```mermaid
+flowchart LR
+  A[Native Nix clients] --> B[Builder pods: native daemon + private SQLite PVC]
+  B -->|Authenticated gRPC: publication and GC| S[Store pod: coordinator + NFS-Ganesha]
+  B -->|Read-only NFS| P[Shared package collection PVC]
+  S --> P
+```
 
-This is an early implementation, not a drop-in Kubernetes operator. The coordinator uses fixed three-node membership. Online GC uses authenticated gRPC; publication still uses SSH. Build clients use the ordinary Nix daemon protocol.
+Each builder retains its own writable store, SQLite database, admission journal, and recovery state. Completed outputs are copied once to the shared collection using native Nix transfer streams over gRPC. Peers register their metadata and bind-mount shared paths into their local store view. SQLite files never live on NFS. Builds execute inside the builder pod; no host Nix installation, host store mount, SSH transport, host daemon, or Kubernetes API access is required.
 
-The Rust process owns coordination, admission, mount management, and recovery. A C ABI wrapper calls the native Nix C++ implementation for store metadata and daemon operations. Nix is pinned to **2.33.6** because that integration is version-sensitive. The current deployment targets Linux x86-64.
+The store pod serves NFSv4 using userspace Ganesha and coordinates online GC. It never deletes shared files before every configured participant acknowledges safe retirement. Kubernetes Service DNS supplies stable addresses. PVCs survive pod replacement and Helm uninstall. See [ONLINE_GC.md](ONLINE_GC.md) and [ADMISSIONS.md](ADMISSIONS.md).
+
+## Requirements and current boundaries
+
+- Linux x86-64 nodes with kernel NFS client support, privileged pods, and mount namespace support. The image includes the userspace mount helper. This is ordinary Kubernetes, but not compatible with a restricted Pod Security policy.
+- RWO PVCs backed by local/block POSIX filesystems such as ext4 or XFS. Ganesha's VFS export requires filesystem file handles; container overlay filesystems and NFS-backed metadata PVCs are unsuitable. Choose storage that fences old writers when moving a PVC.
+- Trusted builders and a trusted cluster network. RPC has bearer authentication; TLS is not implemented. The chart restricts incoming RPC/NFS to its pods when the CNI enforces NetworkPolicy. NFS uses AUTH_SYS.
+- Pool membership is chosen at installation and recorded on each PVC. Resizing an existing pool is deliberately rejected until a retirement protocol exists. Missing participants prevent GC. Do not force-delete a pod whose old process may still be running.
+- Roots acquired through a builder remain pinned for that pod's lifetime. Replacing the pod retires those pins after surviving leases close, while keeping its database and cache. This is conservative, not per-job reclamation.
+- A single store pod is a storage availability dependency. Pod replacement recovers its PVC; this is not a highly available NFS service.
+- Nix is pinned to **2.33.6** because the C++ integration is version-sensitive. The Helm deployment supplies a builder pool; ARC runner scheduling/job attachment remains an integration concern, not an operator feature.
+
+Conflicting content-addressed realisations remain errors and retain their pending roots. Unrelated outputs continue publishing. The system does not resolve nondeterministic build outputs.
 
 ## Build and test
 
@@ -20,24 +55,9 @@ The Rust process owns coordination, admission, mount management, and recovery. A
 nix build
 nix flake check
 nix develop -c cargo test
-```
-
-The package build runs unit tests and tests against real native Nix stores, including authenticated GC coordination and database/admission failure recovery. Privileged mount tests run separately:
-
-```sh
 sudo nix develop -c cargo test --test admissions mounted_paths -- --ignored --nocapture
+helm lint deploy/chart
+python3 deploy/e2e.py --namespace nix-builders --release nix-builders
 ```
 
-Cluster deployment tests exercise the actual ARC pod templates. The retired host-daemon and offline-GC lab suites have been removed.
-
-## Deployment integration
-
-Consume `packages.x86_64-linux.default` from a pinned flake input. Use the same package for host coordination/recovery/GC services and pod builder sidecars. Its closure must be available in the CI store before pods start. `contrib/kubernetes/maintenance.py` supplies online GC and explicit ARC draining for upgrades; it expects the `arc-runners` namespace, cluster configuration, and node-local controller state.
-
-Cluster-specific NixOS modules, inventory, encrypted credentials, ARC Helm values, and GitOps manifests belong in the deploying infrastructure repository. None are included here. Configuration paths and commands are listed by `distributed-nix --help`.
-
-Conflicting content-addressed realisations remain errors and retain their pending roots. The publisher handles ordinary paths separately and checks native mappings on every participant before publishing realisations. Conflicting mappings and their dependents stay queued while unrelated outputs converge. This does not make nondeterministic derivations reproducible or resolve their conflicting mappings.
-
-The current model requires trusted builders and privileged mount operations. The shared filesystem must retain the published data while any participant still references it; a missing participant prevents GC. A single NFS origin is not highly available.
-
-[ADMISSIONS.md](ADMISSIONS.md) describes SQLite admission bookkeeping and its recovery contract.
+Native tests cover publication retry, authentication, bounded transfer streams, admission recovery, GC barriers, and real Nix stores. The deployment test uses a disposable Helm installation and exercises native builds, shared reuse, pod replacement, and online collection. Do not run its failure injection against a busy production pool.

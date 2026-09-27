@@ -79,7 +79,8 @@ impl RootGroup {
 }
 
 pub fn native_group(root: &Path) -> Result<RootGroup> {
-    let pod = std::env::var("CIBOX_POD_UID").context("runner requires CIBOX_POD_UID")?;
+    let pod = std::env::var("DISTRIBUTED_NIX_POD_UID")
+        .context("runner requires DISTRIBUTED_NIX_POD_UID")?;
     group(Path::new(BASE), root, Some(&pod))
 }
 
@@ -450,7 +451,7 @@ impl Node {
         }
         let _admit = Lock::acquire(&self.base.join("admit.lock"), false)?;
         let (root, dead) = if let Some(index) = node {
-            ensure!(index < 3, "worker index");
+            ensure!(index < plan.workers.len(), "worker index");
             (&self.root, &plan.workers[index])
         } else {
             let master = read_json(&self.base.join("online-master.json"))?;
@@ -459,11 +460,13 @@ impl Node {
                 "origin lacks coordinator plan"
             );
             ensure!(
-                master["acks"].as_array().is_some_and(|a| a.len() == 3
-                    && a.iter()
-                        .enumerate()
-                        .all(|(index, v)| v["id"] == id && v["node"] == index)),
-                "all three worker acknowledgements required"
+                master["acks"]
+                    .as_array()
+                    .is_some_and(|a| a.len() == plan.workers.len()
+                        && a.iter()
+                            .enumerate()
+                            .all(|(index, v)| v["id"] == id && v["node"] == index)),
+                "all participant acknowledgements required"
             );
             (&self.origin, &plan.origin)
         };

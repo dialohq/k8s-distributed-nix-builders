@@ -1,0 +1,35 @@
+{{- $name := include "dn.name" . }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}-store
+  labels:
+    {{- include "dn.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "dn.labels" . | nindent 4 }}
+    app.kubernetes.io/component: store
+  ports:
+    - name: rpc
+      port: 9840
+      targetPort: rpc
+    - name: nfs
+      port: 2049
+      targetPort: nfs
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}-builders
+  labels:
+    {{- include "dn.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    {{- include "dn.labels" . | nindent 4 }}
+    app.kubernetes.io/component: builder
+  ports:
+    - name: rpc
+      port: 9840
+      targetPort: rpc

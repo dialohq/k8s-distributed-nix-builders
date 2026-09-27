@@ -1,0 +1,115 @@
+{{- $name := include "dn.name" . }}
+{{- range $role := list "store" "builder" }}
+{{- $values := ternary $.Values.store $.Values.builders (eq $role "store") }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $name }}-{{ $role }}
+  labels:
+    {{- include "dn.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $role }}
+spec:
+  serviceName: {{ $name }}-{{ ternary "store" "builders" (eq $role "store") }}
+  replicas: {{ ternary 1 (int $.Values.builders.replicas) (eq $role "store") }}
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      {{- include "dn.labels" $ | nindent 6 }}
+      app.kubernetes.io/component: {{ $role }}
+  template:
+    metadata:
+      labels:
+        {{- include "dn.labels" $ | nindent 8 }}
+        app.kubernetes.io/component: {{ $role }}
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      nodeSelector:
+        {{- toYaml $.Values.nodeSelector | nindent 8 }}
+      {{- with $.Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $.Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "dn.labels" $ | nindent 20 }}
+                    app.kubernetes.io/component: {{ $role }}
+      containers:
+        - name: {{ $role }}
+          image: {{ printf "%s:%s" $.Values.image.repository $.Values.image.tag | quote }}
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          securityContext:
+            privileged: true
+            runAsUser: 0
+          env:
+            - name: DISTRIBUTED_NIX_ROLE
+              value: {{ $role }}
+            - name: DISTRIBUTED_NIX_POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: DISTRIBUTED_NIX_STORE_HOST
+              value: {{ printf "%s-store.%s.svc.%s" $name $.Release.Namespace $.Values.clusterDomain | quote }}
+            - name: DISTRIBUTED_NIX_GC_INTERVAL_SECONDS
+              value: {{ $.Values.gc.intervalSeconds | quote }}
+            - name: DISTRIBUTED_NIX_GC_MIN_FREE_PERCENT
+              value: {{ $.Values.gc.minFreePercent | quote }}
+          resources:
+            {{- toYaml $values.resources | nindent 12 }}
+          ports:
+            - name: rpc
+              containerPort: 9840
+            {{- if eq $role "store" }}
+            - name: nfs
+              containerPort: 2049
+            {{- end }}
+          startupProbe:
+            exec:
+              command: ["/bin/sh", "-c", "test -f /run/distributed-nix-ready"]
+            periodSeconds: 2
+            failureThreshold: 600
+          readinessProbe:
+            tcpSocket:
+              port: rpc
+            periodSeconds: 2
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: config
+              mountPath: /etc/distributed-nix/participants.json
+              subPath: participants.json
+              readOnly: true
+            - name: token
+              mountPath: /run/secrets/controller
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: {{ $name }}
+        - name: token
+          secret:
+            secretName: {{ include "dn.secret" $ }}
+            defaultMode: 256
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- with $values.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ $values.storage }}
+{{- end }}

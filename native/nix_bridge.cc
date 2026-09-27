@@ -121,6 +121,60 @@ int reply(distributed_nix_buffer *out, std::string_view text, int status) noexce
     return status;
 }
 
+class TransferStore : public nix::LocalStore {
+public:
+    explicit TransferStore(nix::ref<const nix::LocalStoreConfig> config)
+        : nix::Store(*config), nix::LocalFSStore(*config), nix::LocalStore(config) {}
+
+    void collectGarbage(const nix::GCOptions &, nix::GCResults &) override
+    {
+        throw nix::Error("shared store GC requires the administrator coordinator");
+    }
+
+    void optimiseStore() override
+    {
+        throw nix::Error("transfer endpoint does not optimise the store");
+    }
+
+    void repairPath(const nix::StorePath &) override
+    {
+        throw nix::Error("cannot repair a live shared collection");
+    }
+
+    void buildPaths(const std::vector<nix::DerivedPath> &, nix::BuildMode,
+        std::shared_ptr<nix::Store>) override
+    {
+        throw nix::Error("collection endpoint does not execute builds");
+    }
+
+    std::vector<nix::KeyedBuildResult> buildPathsWithResults(
+        const std::vector<nix::DerivedPath> &, nix::BuildMode, std::shared_ptr<nix::Store>) override
+    {
+        throw nix::Error("collection endpoint does not execute builds");
+    }
+
+    nix::BuildResult buildDerivation(const nix::StorePath &, const nix::BasicDerivation &,
+        nix::BuildMode) override
+    {
+        throw nix::Error("collection endpoint does not execute builds");
+    }
+
+    nix::StorePath addToStoreFromDump(nix::Source &, std::string_view,
+        nix::FileSerialisationMethod, nix::ContentAddressMethod, nix::HashAlgorithm,
+        const nix::StorePathSet &, nix::RepairFlag) override
+    {
+        throw nix::Error("collection uploads require path metadata");
+    }
+
+    void addToStore(const nix::ValidPathInfo & info, nix::Source & source,
+        nix::RepairFlag repair, nix::CheckSigsFlag checkSigs) override
+    {
+        if (repair != nix::NoRepair) throw nix::Error("cannot replace a live shared path");
+        nix::settings.fsyncStorePaths = true;
+        nix::LocalStore::addToStore(info, source, repair, checkSigs);
+    }
+};
+
 nlohmann::json invoke(uint32_t op, const char *uri, const nlohmann::json &input)
 {
     if (op < DISTRIBUTED_NIX_DUMP || op > 14)
@@ -365,5 +419,25 @@ extern "C" int distributed_nix_serve_v1(int trusted, distributed_nix_buffer *res
         return reply(result, e.what(), 1);
     } catch (...) {
         return reply(result, "unknown exception in native daemon", 1);
+    }
+}
+
+extern "C" int distributed_nix_serve_transfer_v1(const char *uri, int trusted, distributed_nix_buffer *result) noexcept
+{
+    if (!result) return 2;
+    *result = {nullptr, 0};
+    if (!uri) return reply(result, "null store URI", 2);
+    try {
+        std::call_once(initialized, [] { nix::initNix(); });
+        auto local = nix::openStore(uri).dynamic_pointer_cast<nix::LocalStore>();
+        if (!local) throw nix::Error("collection requires a local store");
+        auto store = nix::make_ref<TransferStore>(local->config);
+        nix::daemon::processConnection(store, nix::FdSource(0), nix::FdSink(1),
+            trusted ? nix::Trusted : nix::NotTrusted, nix::daemon::NotRecursive);
+        return 0;
+    } catch (const std::exception & e) {
+        return reply(result, e.what(), 1);
+    } catch (...) {
+        return reply(result, "unknown exception in native collection daemon", 1);
     }
 }

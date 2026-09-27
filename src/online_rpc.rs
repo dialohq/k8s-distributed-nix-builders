@@ -15,9 +15,7 @@ use serde_json::{Value, json};
 use std::{
     collections::BTreeSet,
     fs,
-    net::SocketAddr,
     path::PathBuf,
-    process::Command,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -32,62 +30,61 @@ const MAX: usize = 64 * 1024 * 1024;
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    pub nodes: Vec<SocketAddr>,
+    pub nodes: Vec<String>,
     pub index: usize,
     pub token_file: PathBuf,
-    pub cri_command: Vec<String>,
-    pub namespace: String,
+    pub pod_uid: Option<String>,
 }
 impl Config {
-    fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> Result<()> {
         ensure!(
-            self.nodes.len() == 3 && self.index < 3,
-            "three GC endpoints required"
+            !self.nodes.is_empty() && self.index < self.nodes.len(),
+            "invalid participant endpoints"
         );
         ensure!(
-            self.nodes.iter().collect::<BTreeSet<_>>().len() == 3,
+            self.nodes.iter().collect::<BTreeSet<_>>().len() == self.nodes.len(),
             "duplicate endpoints"
         );
-        ensure!(
-            !self.cri_command.is_empty() && self.cri_command[0].starts_with('/'),
-            "absolute CRI command required"
-        );
+        for endpoint in &self.nodes {
+            let uri: tonic::transport::Uri = format!("http://{endpoint}").parse()?;
+            ensure!(
+                uri.host().is_some() && uri.port_u16().is_some(),
+                "endpoint requires host and port"
+            );
+        }
         Ok(())
     }
-    fn token(&self) -> Result<String> {
+    pub fn token(&self) -> Result<String> {
         let token = fs::read_to_string(&self.token_file)?.trim().to_owned();
         ensure!((32..=256).contains(&token.len()), "invalid token length");
         Ok(token)
     }
     fn pods(&self) -> Result<(BTreeSet<String>, BTreeSet<String>)> {
-        let reply =
-            crate::util::json(Command::new(&self.cri_command[0]).args(&self.cri_command[1..]))?;
-        let mut all = BTreeSet::new();
-        let mut required = BTreeSet::new();
-        for pod in reply["items"].as_array().context("CRI sandbox list")? {
-            let uid = pod["metadata"]["uid"]
-                .as_str()
-                .context("sandbox UID")?
-                .to_owned();
-            if pod["metadata"]["namespace"] == self.namespace {
-                required.insert(uid.clone());
-            }
-            all.insert(uid);
-        }
-        Ok((required, all))
+        let pods: BTreeSet<_> = self.pod_uid.iter().cloned().collect();
+        Ok((pods.clone(), pods))
     }
 }
 
 #[derive(Clone)]
 pub struct Service {
-    node: Node,
-    config: Config,
+    pub(crate) node: Node,
+    pub(crate) config: Config,
     token: Arc<Vec<u8>>,
 }
 impl Service {
     pub fn new(node: Node, config: Config) -> Result<Self> {
         config.validate()?;
         let token = Arc::new(format!("Bearer {}", config.token()?).into_bytes());
+        let identity = json!({"nodes":config.nodes,"index":config.index});
+        let file = node.base.join("membership.json");
+        if file.exists() {
+            ensure!(
+                read_json(&file)? == identity,
+                "participant membership differs from persistent volume; explicit retirement is required before resizing the pool"
+            );
+        } else {
+            durable(&file, &identity)?;
+        }
         Ok(Self {
             node,
             config,
@@ -125,6 +122,7 @@ impl Service {
                             .node
                             .online_preflight(&request.epoch, &required, &all)?;
                     report["index"] = json!(service.config.index);
+                    report["members"] = json!(service.config.nodes);
                     Ok(report)
                 }
                 "snapshot" => Ok(serde_json::to_value(
@@ -133,6 +131,10 @@ impl Service {
                 "prepare" | "plan" => {
                     let plan: Plan = serde_json::from_slice(&request.plan_json)?;
                     ensure!(plan.id == request.epoch, "request epoch differs from plan");
+                    ensure!(
+                        plan.workers.len() == service.config.nodes.len(),
+                        "plan membership differs from service"
+                    );
                     if op == "prepare" {
                         service.node.online_prepare(&plan)
                     } else {
@@ -198,6 +200,11 @@ pub async fn serve(
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
     Server::builder()
+        .add_service(crate::transport::server(
+            service.node.clone(),
+            service.config.clone(),
+            std::env::current_exe()?,
+        )?)
         .add_service(
             OnlineGcServer::new(service)
                 .max_decoding_message_size(MAX)
@@ -274,8 +281,12 @@ pub async fn collect(
         ensure!(!dry, "resume active epoch before preview");
         read_json(&file)?
     } else {
-        json!({"id":format!("{:032x}",SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()),"phase":"prepare"})
+        json!({"id":format!("{:032x}",SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()),"phase":"prepare", "members":config.nodes})
     };
+    ensure!(
+        state["members"] == json!(config.nodes),
+        "active collection membership changed"
+    );
     let id = state["id"].as_str().context("epoch")?.to_owned();
     let token: tonic::metadata::MetadataValue<tonic::metadata::Ascii> =
         format!("Bearer {}", config.token()?).parse()?;
@@ -295,6 +306,10 @@ pub async fn collect(
         let mut pressure = false;
         for (index, client) in clients.iter_mut().enumerate() {
             let report = client.call("preflight", &id, false, None).await?;
+            ensure!(
+                report["members"] == json!(config.nodes),
+                "participant membership mismatch"
+            );
             ensure!(
                 report["index"] == index,
                 "GC endpoint has the wrong node identity"

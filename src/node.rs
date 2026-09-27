@@ -410,7 +410,7 @@ impl Node {
         let mut builders = Vec::new();
         let build_group = m["buildGroupId"].as_u64().unwrap_or(30000);
         for index in 1..=32 {
-            let name = format!("cibox-nixbld{index}");
+            let name = format!("nixbld{index}");
             passwd.push_str(&format!(
                 "{name}:x:{}:{build_group}:Nix build user:/var/empty:/bin/false\n",
                 62000 + index
@@ -421,7 +421,7 @@ impl Node {
         fs::write(
             root.join("etc/group"),
             format!(
-                "root:x:0:\nnogroup:x:65534:\ncibox-nixbld:x:{build_group}:{}\n",
+                "root:x:0:\nnogroup:x:65534:\nnixbld:x:{build_group}:{}\n",
                 builders.join(",")
             ),
         )?;
@@ -470,7 +470,7 @@ impl Node {
             m["nixConfig"].as_str().context("runtime nixConfig")?,
         )?;
         if !origin {
-            // The NixOS module mounts the backend; admission only needs POSIX paths.
+            // The runtime mounts the backend; admission only needs POSIX paths.
             ensure!(mountpoint(&self.lower)?, "shared collection is not mounted");
             mount(
                 &root.join("nix/store"),
@@ -485,45 +485,7 @@ impl Node {
         fs::create_dir_all(self.base.join("admissions"))?;
         Ok(())
     }
-    pub fn command(&self, cmd: &str, origin: bool, lease: bool) -> Result<Value> {
-        let root = if origin { &self.origin } else { &self.root };
-        if lease {
-            let l = Lock::acquire(&self.base.join("clients.lock"), true)?;
-            let r =
-                read_json(&self.base.join("ready")).context("node recovery has not completed")?;
-            ensure!(
-                r["boot_id"].as_str()
-                    == Some(fs::read_to_string("/proc/sys/kernel/random/boot_id")?.trim()),
-                "mount recovery required after reboot"
-            );
-            l.inherit()?;
-        }
-        let m = self.runtime()?;
-        let path = m["runtime"]
-            .as_array()
-            .context("runtime")?
-            .iter()
-            .map(|p| format!("{}/bin", p.as_str().unwrap_or("")))
-            .collect::<Vec<_>>()
-            .join(":");
-        let err = Command::new("unshare")
-            .args(["--mount", "--propagation", "slave", "--uts", "--ipc"])
-            .arg(std::env::current_exe()?)
-            .arg("pivot")
-            .arg(root)
-            .arg(format!(
-                "{}/bin/env",
-                m["coreutils"].as_str().context("coreutils")?
-            ))
-            .args(["-i", "HOME=/root", "USER=root"])
-            .arg(format!("PATH={path}"))
-            .arg("NIX_REMOTE=local?path-info-cache-size=0")
-            .arg(format!("{}/bin/bash", m["bash"].as_str().context("bash")?))
-            .arg("-c")
-            .arg(format!("set -e; {cmd}"))
-            .exec();
-        Err(err).context("launch namespace with unshare")
-    }
+
     pub(crate) fn restore_admissions(&self) -> Result<Vec<Value>> {
         self.online_restore_checkpoint()?;
         self.prepare(false)?;
@@ -637,45 +599,11 @@ impl Node {
         self.prepare(true)?;
         Ok(json!({"origin":"ready"}))
     }
-    fn hold_lease(&self) -> Result<Value> {
-        use std::io::Write;
-        let _publication = Lock::acquire(&self.base.join("publication.lock"), true)?;
-        println!("leased");
-        std::io::stdout().flush()?;
-        std::io::copy(&mut std::io::stdin(), &mut std::io::sink())?;
-        Ok(Value::Null)
-    }
     pub fn dispatch(&self, args: &[String]) -> Result<Value> {
         fs::create_dir_all(&self.base)?;
         let op = arg(args, 0)?;
         if op == "connection" {
             return self.connection(arg(args, 1)? == "trusted");
-        }
-        if op == "upgrade-mounts" {
-            let _gate = Lock::acquire(&self.base.join("maintenance.lock"), false)?;
-            let _clients = Lock::acquire(&self.base.join("clients.lock"), false)?;
-            if self.base.join("ready").exists() {
-                fs::remove_file(self.base.join("ready"))?;
-            }
-            let mut paths = std::collections::BTreeSet::new();
-            Admissions::open(&self.base.join("admissions"))?.for_each(|journal| {
-                for (p, kind) in journal.plan {
-                    if matches!(kind, Kind::MountDir | Kind::MountFile) {
-                        paths.insert(p);
-                    }
-                }
-                Ok(())
-            })?;
-            for p in paths {
-                let dst = physical(&self.root, &p);
-                if present(&dst) && mountpoint(&dst)? {
-                    run(Command::new("umount").arg(dst))?;
-                }
-            }
-            if mountpoint(&self.lower)? {
-                run(Command::new("umount").arg(&self.lower))?;
-            }
-            return Ok(json!({"mounts_ready_for_recovery":true}));
         }
         if op == "runner-daemon" {
             return self.serve();
@@ -684,16 +612,7 @@ impl Node {
             let _gate = Lock::acquire(&self.base.join("maintenance.lock"), false)?;
             return self.recover();
         }
-        // Internal native stdio copies and metadata operations also participate.
-        let _gate = {
-            let gate = Lock::acquire(&self.base.join("maintenance.lock"), true)?;
-            if matches!(op, "stdio" | "origin-stdio") {
-                gate.inherit()?;
-                None
-            } else {
-                Some(gate)
-            }
-        };
+        let _gate = Lock::acquire(&self.base.join("maintenance.lock"), true)?;
         match op {
             "ca-outbox" => self.ca_outbox(),
             "ca-acknowledge" => self.ca_acknowledge(&args[1..]),
@@ -715,7 +634,6 @@ impl Node {
             "outbox" => self.outbox(),
             "acknowledge" => self.acknowledge(&args[1..]),
             "valid-paths" => crate::native::valid_paths(&self.root, &args[1..]),
-            "lease" => self.hold_lease(),
             "dump" | "dump-origin" => {
                 let root = if args[0] == "dump-origin" {
                     &self.origin
@@ -740,16 +658,6 @@ impl Node {
             "resume-origin" => self.resume_origin(),
             "reserve" | "commit" => self.publication(Path::new(arg(args, 1)?), args[0] == "commit"),
             "pin-local" => self.pin(&args[1..]),
-            "stdio" | "origin-stdio" => {
-                let m = self.runtime()?;
-                let nix = m["nix"].as_str().context("nix runtime")?;
-                let origin = args[0] == "origin-stdio";
-                self.command(
-                    &format!("{nix}/bin/nix daemon --stdio --store local?path-info-cache-size=0"),
-                    origin,
-                    !origin,
-                )
-            }
             "receive" => {
                 let m = Manifest::parse(serde_json::from_slice(&read_stdin()?)?)?;
                 let p = self.base.join("incoming").join(format!("{}.json", m.id()?));

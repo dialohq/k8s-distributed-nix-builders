@@ -1,0 +1,46 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "dn.name" . }}-test
+  labels:
+    {{- include "dn.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  {{- with .Values.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  containers:
+    - name: rpc
+      image: {{ printf "%s:%s" .Values.image.repository .Values.image.tag | quote }}
+      imagePullPolicy: {{ .Values.image.pullPolicy }}
+      command:
+        - /bin/bash
+        - -ec
+        - |
+          python3 -c 'import json; v=json.load(open("/config/participants.json")); v.update(index=0,pod_uid=None); json.dump(v,open("/tmp/controller.json","w"))'
+          export DISTRIBUTED_NIX_ONLINE_CONFIG=/tmp/controller.json
+          for attempt in {1..30}; do
+            if distributed-nix status; then exit 0; fi
+            sleep 2
+          done
+          exit 1
+      volumeMounts:
+        - name: config
+          mountPath: /config
+          readOnly: true
+        - name: token
+          mountPath: /run/secrets/controller
+          readOnly: true
+  volumes:
+    - name: config
+      configMap:
+        name: {{ include "dn.name" . }}
+    - name: token
+      secret:
+        secretName: {{ include "dn.secret" . }}
+        defaultMode: 256
