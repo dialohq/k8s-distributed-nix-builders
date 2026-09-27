@@ -408,6 +408,9 @@ impl Cluster {
         let mut pending = vec![ready];
         let mut rows = Vec::new();
         while let Some(ids) = pending.pop() {
+            if !pending.is_empty() {
+                rows.extend(self.publish_paths_pending()?);
+            }
             let subset = manifest.realisation_closure(&ids)?;
             match self.publish_manifest(node, &subset, &[0, 1, 2]) {
                 Ok(publication) => {
@@ -434,7 +437,7 @@ impl Cluster {
         Ok(rows)
     }
 
-    pub fn publish_pending(&self) -> Result<Value> {
+    fn publish_paths_pending(&self) -> Result<Vec<Value>> {
         let mut rows = Vec::new();
         for n in 0..3 {
             let result = (|| -> Result<Value> {
@@ -455,6 +458,11 @@ impl Cluster {
                 Err(e) => json!({"node":n,"error":format!("{e:#}")}),
             });
         }
+        Ok(rows)
+    }
+
+    pub fn publish_pending(&self) -> Result<Value> {
+        let mut rows = self.publish_paths_pending()?;
         for node in 0..3 {
             match self.publish_ca_pending(node) {
                 Ok(publications) => rows.extend(publications),
