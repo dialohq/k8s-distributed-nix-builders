@@ -17,3 +17,11 @@ spec:
           port: 9840
         - protocol: TCP
           port: 2049
+
+    {{- with .Values.arcClients }}
+    - from:
+        {{- toYaml . | nindent 8 }}
+      ports:
+        - protocol: TCP
+          port: 9840
+    {{- end }}

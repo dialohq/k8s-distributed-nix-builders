@@ -195,6 +195,9 @@ pub async fn serve(
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
     Server::builder()
+        .http2_keepalive_interval(Some(std::time::Duration::from_secs(20)))
+        .http2_keepalive_timeout(Some(std::time::Duration::from_secs(10)))
+        .add_service(crate::runner::server(&service.config)?)
         .add_service(crate::transport::server(
             service.node.clone(),
             service.config.clone(),
