@@ -51,24 +51,12 @@ pub fn prepare() -> Result<()> {
     let cgroup = crate::job_cgroup::parent(Path::new("/run/distributed-nix-cgroups"))?;
     for path in [
         "/work/arc",
-        "/work/git",
         "/work/cache",
         "/run/distributed-nix-runner/jobs",
-        "/var/cache/cibox",
     ] {
         fs::create_dir_all(path)?;
     }
-    for cache in ["/work/git", "/work/cache"] {
-        std::os::unix::fs::chown(cache, Some(1001), Some(1001))?;
-    }
-    let cache = Path::new("/var/cache/cibox/git");
-    if !cache.try_exists()? {
-        std::os::unix::fs::symlink("/work/git", cache)?;
-    }
-    ensure!(
-        fs::canonicalize(cache)? == fs::canonicalize("/work/git")?,
-        "Git cache must be on the builder PVC"
-    );
+    std::os::unix::fs::chown("/work/cache", Some(1001), Some(1001))?;
     let runtime = Runtime {
         program: program.into(),
         cgroup,

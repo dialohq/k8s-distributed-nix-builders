@@ -1,13 +1,14 @@
 # ARC attachment to warm builders
 
-The optional `0.4.0-arc` builder image includes the official GitHub runner. The
+The optional `0.4.1-arc` builder image includes the official GitHub runner. The
 ordinary image runs a thin `distributed-nix arc-client` in each ARC runner pod.
 ARC supplies its normal JIT configuration; the client reserves one builder over
 an authenticated bidirectional gRPC stream before sending that configuration.
 There is one runner slot per builder. Additional ARC pods wait for capacity.
 
 All job execution happens in the builder pod. The shared package collection and
-each builder's SQLite database, workspace and Git mirrors live on their PVCs.
+each builder's SQLite database and workspace live on its PVC. Git caching is
+external to the builders; use a shared Git service if CI needs a mirror.
 Neither component mounts a host store. ARC clients need only a ConfigMap,
 Secret and small emptyDir; they run without privileges as UID 1001.
 
