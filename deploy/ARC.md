@@ -18,7 +18,7 @@ has `builders` (individual builder DNS names with port 9840) and `token_file`.
 Mount the pool's authentication token at that path. Set
 `DISTRIBUTED_NIX_POD_UID` from the client pod's metadata.uid. Configure ARC's
 runner container command as `/bin/distributed-nix arc-client` and provide a
-writable emptyDir at `/run/distributed-nix-arc-client`.
+writable emptyDir at `/run/distributed-nix-arc-client`, and set `HOME` to it.
 
 The backend executes only the image's fixed GitHub runner program, as UID 1001.
 It creates a native Nix daemon for that job. Both enter a child cgroup of the

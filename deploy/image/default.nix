@@ -26,8 +26,8 @@
     ln -s ${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt $out/etc/ssl/certs/ca-certificates.crt
     ln -s ${pkgs.bash}/bin/bash $out/bin/bash
     ln -s ${pkgs.bash}/bin/sh $out/bin/sh
-    echo 'root:x:0:0:root:/root:/bin/bash' > $out/etc/passwd
-    echo 'root:x:0:' > $out/etc/group
+    printf 'root:x:0:0:root:/root:/bin/bash\nrunner:x:1001:1001:ARC client:/run/distributed-nix-arc-client:/bin/bash\n' > $out/etc/passwd
+    printf 'root:x:0:\nrunner:x:1001:\n' > $out/etc/group
   '';
 in pkgs.dockerTools.buildLayeredImage {
   name = "ghcr.io/dialohq/k8s-distributed-nix-builders";

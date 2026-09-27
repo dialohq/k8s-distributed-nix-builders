@@ -409,7 +409,7 @@ async fn start(role: Role, processes: &mut Processes, nfs: &mut KernelNfs) -> Re
             libc::MS_BIND,
         )?;
     }
-    for path in ["nix/nix.conf", "passwd", "group"] {
+    for path in ["nix/nix.conf", "nix/registry.json", "passwd", "group"] {
         fs::copy(format!("{ROOT}/etc/{path}"), format!("/etc/{path}"))?;
     }
     if role == Role::Builder {

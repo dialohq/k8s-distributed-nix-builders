@@ -47,6 +47,7 @@ jobs:
             --set store.storage=10Gi --set builders.storage=10Gi \
             --set gc.intervalSeconds=86400 --wait --timeout 15m
           helm test e2e --namespace nix-builders --logs
+          python3 deploy/arc_smoke.py --namespace nix-builders --release e2e
           python3 deploy/e2e.py --namespace nix-builders --release e2e
       - name: Diagnose failure
         if: failure()
