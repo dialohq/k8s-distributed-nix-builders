@@ -91,6 +91,8 @@ started = time.monotonic()
 eventually(ready, timeout=600)
 status = json.loads(execute(store, 'distributed-nix', 'status').stdout)
 assert len(status) == 4
+assert int(execute(store, 'cat', '/proc/fs/nfsd/threads').stdout) > 0
+assert execute(store, 'findmnt', '-n', '-T', '/proc/fs/nfsd', '-o', 'FSTYPE').stdout.strip() == 'nfsd'
 name = 'helm-e2e-' + uuid.uuid4().hex[:12]
 plain = expression(name)
 output = build(builders[0], plain)
@@ -111,7 +113,45 @@ passed('builder_replacement')
 replace(store)
 assert execute(builders[1], 'cat', output + '/result').stdout.strip() == name
 assert build(builders[1], ca, no_build=True) == ca_output
+# A new, unpredictable file forces a server round trip on the pre-existing
+# client mount. Reading an old tiny build output alone could hit the page cache.
+probe = '/.e2e-nfs-' + uuid.uuid4().hex
+content = uuid.uuid4().hex
+execute(store, 'bash', '-ec', 'printf %s "$2" > "$1"', 'probe',
+        '/srv/distributed-nix/origin' + probe, content)
+try:
+    for pod in builders:
+        assert execute(pod, 'cat', '/var/lib/distributed-nix/lower' + probe).stdout == content
+finally:
+    execute(store, 'rm', '/srv/distributed-nix/origin' + probe)
 passed('store_replacement_and_nfs_reconnect')
+
+# Restart just the container: the pod network namespace survives a crash, so
+# startup must also recover kernel NFSD threads left behind by its predecessor.
+before = json.loads(kubectl('get', 'pod', store, '-o', 'json').stdout)
+container_id = before['status']['containerStatuses'][0]['containerID']
+execute(store, 'python3', '-c', '''import os, signal
+children = open('/proc/1/task/1/children').read().split()
+owners = [int(pid) for pid in children if open('/proc/' + pid + '/cmdline', 'rb').read().split(b'\\0')[-2:] == [b'pod', b'']]
+assert len(owners) == 1, owners
+os.kill(owners[0], signal.SIGKILL)
+''', check=False)
+def restarted():
+    current = json.loads(kubectl('get', 'pod', store, '-o', 'json').stdout)
+    assert current['metadata']['uid'] == before['metadata']['uid']
+    replacement = current['status']['containerStatuses'][0].get('containerID')
+    assert replacement and replacement != container_id
+    ready()
+eventually(restarted, timeout=300)
+assert int(execute(store, 'cat', '/proc/fs/nfsd/threads').stdout) > 0
+probe = '/.e2e-nfs-' + uuid.uuid4().hex
+execute(store, 'touch', '/srv/distributed-nix/origin' + probe)
+try:
+    for pod in builders:
+        execute(pod, 'stat', '/var/lib/distributed-nix/lower' + probe)
+finally:
+    execute(store, 'rm', '/srv/distributed-nix/origin' + probe)
+passed('store_container_crash_and_nfs_recovery')
 
 # A missing member must stop collection before deleting shared bytes.
 kubectl('scale', 'statefulset', base + '-builder', '--replicas=2')

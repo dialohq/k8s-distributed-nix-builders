@@ -8,6 +8,15 @@ fn main() {
 }
 fn execute() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("pod") {
+        return distributed_nix::pod::run();
+    }
+    if args.first().map(String::as_str) == Some("pod-seed") {
+        return distributed_nix::pod::seed_worker(arg(&args, 1)?);
+    }
+    if args.first().map(String::as_str) == Some("pod-mount-nfs") {
+        return distributed_nix::pod::mount_nfs_worker();
+    }
     if args.is_empty() || args[0] == "--help" {
         println!(
             "distributed-nix: native Nix, private metadata, shared packages\n\nConfiguration: DISTRIBUTED_NIX_ONLINE_CONFIG (default /etc/distributed-nix/online-gc.json)\nCommands: serve, publisher, status, bootstrap, publish PARTICIPANT PATH..., reconcile ID, gc [--dry-run | --if-needed]\nInternal: node OP ARGS..., pivot ROOT COMMAND ARGS..."

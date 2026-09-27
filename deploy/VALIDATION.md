@@ -1,39 +1,45 @@
 # Portable deployment validation
 
-The Helm chart was exercised on a disposable namespace in a three-node Kubernetes
-cluster on 2026-09-27, using four independent OpenEBS LVM PVCs. The pods had no
+The kernel-NFS image with the Rust pod supervisor was exercised on a disposable
+namespace in a three-node Kubernetes cluster on 2026-09-27. Four independent
+OpenEBS LVM PVCs hold the shared collection and private stores. Pods have no
 hostPath volumes, host PID/network namespace, host Nix store, or Kubernetes API
-token. The store and builder RPC endpoints used Kubernetes Service DNS.
+token. RPC and NFS use Kubernetes Services.
 
-`deploy/e2e.py` passed these checks in **79.72 seconds** after installation:
+The final `deploy/e2e.py` run passed all nine checks in **58.38 seconds** after
+pod recreation, using the unmodified Helm configuration:
 
-- Native sandboxed build, followed by reuse on both peers with builds and
-  binary-cache substitution disabled. `findmnt` confirmed NFS-backed outputs.
+- Native sandboxed build and reuse on both peers with builds and binary-cache
+  substitution disabled. `findmnt` confirmed NFS-backed output paths.
 - Content-addressed output/realisations reused on both peers.
-- Builder pod replacement recovered private metadata and shared mounts.
-- Store pod replacement retained published data and restored NFS access.
+- Builder replacement recovered private metadata and shared mounts.
+- Store replacement retained data and recovered existing client mounts. Reading
+  a newly generated file forces a network request instead of accepting cached data.
+- SIGKILL of the Rust supervisor restarted the container inside the same pod.
+  NFSD recovered in the surviving network namespace; every builder could see a
+  newly created file afterward.
 - A missing participant prevented shared GC deletion.
 - Killing the GC coordinator after durable retirement barriers, then resuming.
-- A native build completed while online GC ran.
-- After retiring every builder pod that had touched the output, GC deleted the
-  now-unrooted shared path.
+- A native build explicitly blocked on a FIFO while online GC ran, then completed
+  after the test released it. No guessed build duration or startup sleep.
+- Once all builders that touched an output were replaced, GC reclaimed that output.
 
-This elapsed time is the integration suite duration, not a build benchmark.
-The suite uses small synthetic derivations. It does not measure `dialo/main.yml`
-performance or prove compatibility with every CSI driver/CNI.
+The native suite passed **41 tests**. The separately invoked privileged mount
+recovery/concurrent admission test passed after replacing mount utilities with
+syscalls. Supervisor tests use socket acknowledgements to exercise child failure
+and termination/reaping after startup failure. Helm lint passed.
 
-The native suite passed 33 tests; the separately invoked privileged mount recovery
-test also passed. The transport test sends a 1 MiB NAR through source and destination
-gRPC streams, retries publication, rejects unauthenticated requests and direct GC,
-and verifies publication lease release. Helm lint and the authenticated Helm test
-hook passed. Chart rendering was checked with one and five builder members.
+The suite duration is not a build benchmark. These are synthetic derivations;
+they do not measure `dialo/main.yml` performance or prove compatibility with every
+CSI driver/CNI. Existing ARC workloads remain on their current deployment during
+this isolated validation.
 
-`.github/workflows/helm.yaml` runs the same deployment test in kind on Ubuntu,
-including multiple independent builder PVCs on one Kubernetes node. It passed on Ubuntu in [run 36338175220](https://github.com/dialohq/k8s-distributed-nix-builders/actions/runs/36338175220):
-all eight checks passed in 117.48 seconds after installation. The Helm test hook
-also passed. This provides an independent non-NixOS deployment check.
+The earlier userspace-NFS version passed the deployment suite in kind on Ubuntu
+in [run 36338175220](https://github.com/dialohq/k8s-distributed-nix-builders/actions/runs/36338175220).
+That result is historical, not evidence for the current kernel-NFS image.
+`.github/workflows/helm.yaml` now loads `nfs` and `nfsd` on the Ubuntu host and runs
+the nine checks with multiple independent builders on one kind node before
+optional image/chart publication.
 
-The subsequent [concurrency audit](../RACES.md) replaces timing-based internal
-tests with process acknowledgements and explicit state transitions. Its native
-suite passes 37 tests. The build/GC deployment test now uses FIFO barriers;
-it no longer assumes a build is running after an arbitrary sleep.
+See [RACES.md](../RACES.md) for the concurrency audit, deterministic regression
+tests, and remaining assumptions.
