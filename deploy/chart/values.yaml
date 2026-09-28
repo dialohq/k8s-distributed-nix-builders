@@ -17,6 +17,7 @@ store:
 builders:
   image: ""
   extraNixConfig: ""
+  runnerSlots: 1
   # Stable pool membership: select at installation; do not shrink existing PVCs
   # out of the pool. An unavailable participant intentionally prevents GC.
   replicas: 3

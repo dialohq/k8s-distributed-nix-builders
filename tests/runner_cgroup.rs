@@ -65,3 +65,46 @@ async fn detached_descendant_is_dead_before_group_is_reusable() -> Result<()> {
     distributed_nix::linux::unmount(Path::new(&temp.path().join("cgroups")))?;
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires writable cgroup v2 and root"]
+async fn cleaning_one_job_preserves_concurrent_job_processes() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let parent = distributed_nix::job_cgroup::parent(&temp.path().join("cgroups"))?;
+    let mut jobs = Vec::new();
+    for i in 0..2 {
+        let socket = temp.path().join(format!("ready-{i}"));
+        let listener = tokio::net::UnixListener::bind(&socket)?;
+        let id = format!("parallel-{}-{i}", std::process::id());
+        let group = Group::new(&parent, &id)?;
+        let mut command = tokio::process::Command::new(std::env::current_exe()?);
+        command
+            .args(["--exact", "detached_fixture", "--nocapture"])
+            .env("DISTRIBUTED_NIX_CGROUP_FIXTURE", &socket)
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .kill_on_drop(true);
+        group.attach(&mut command, false)?;
+        let child = command.spawn()?;
+        drop(command);
+        let (mut connection, _) = listener.accept().await?;
+        let mut byte = [0];
+        connection.read_exact(&mut byte).await?;
+        ensure!(byte == *b"R");
+        jobs.push((group, child, connection, id));
+    }
+    let (first, mut first_child, mut first_socket, _) = jobs.remove(0);
+    first.stop().await?;
+    ensure!(!first_child.wait().await?.success());
+    ensure!(first_socket.read(&mut [0]).await? == 0);
+
+    let (second, mut second_child, mut second_socket, id) = jobs.remove(0);
+    ensure!(second_child.try_wait()?.is_none());
+    let events = std::fs::read_to_string(parent.join(format!("arc-{id}/cgroup.events")))?;
+    ensure!(events.lines().any(|line| line == "populated 1"));
+    second.stop().await?;
+    ensure!(!second_child.wait().await?.success());
+    ensure!(second_socket.read(&mut [0]).await? == 0);
+    distributed_nix::linux::unmount(&temp.path().join("cgroups"))?;
+    Ok(())
+}
