@@ -5,12 +5,19 @@ Run `distributed-nix gc` inside the store pod. `--dry-run` reports a plan;
 The store container runs this check periodically. Builds continue during GC.
 
 Each native daemon connection pins paths before reading their metadata or
-registering them. Connections share permanent Nix roots keyed by
-`DISTRIBUTED_NIX_POD_UID`, supplied through the downward API. A participant owns
-one builder pod and its private PVC. Pins survive until that pod is replaced
-and all old connection/listener leases close. This covers shells that outlive
-their Nix connection and conservatively retains everything acquired during a
-pod's lifetime; it does not reclaim those roots between jobs in the same pod.
+registering them. Connections share Nix roots keyed by `DISTRIBUTED_NIX_POD_UID`.
+Ordinary clients use the pod UID: their pins survive until pod replacement and
+lease closure, covering shells that outlive their Nix connection. ARC jobs use
+their own group; the runner service holds its lease until the entire job cgroup
+is empty. A cleanup failure retains the lease until the poisoned builder exits.
+
+Published local directories and large files can be reclaimed independently of
+shared GC. Relocation fences native connections, excludes active GC epochs and
+all live client/runtime closures, then replaces matching local payloads with
+read-only shared mounts. It persists an intent before deleting anything and
+updates every overlapping admission plan in one SQLite transaction. Recovery
+finishes that intent before runtime seeding or admitting new clients. Small
+standalone files, symlinks and differing local variants remain local.
 
 The coordinator pauses publication, reads the union of native roots and
 reference graphs, and installs durable retirement markers for candidate paths

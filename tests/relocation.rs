@@ -148,6 +148,16 @@ fn mounted_relocation_reclaims_payloads_and_recovers_crashes() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let (node, paths, file) = fixture(temp.path())?;
     let metadata = native::dump(&node.root, &paths)?;
+    durable(&node.base.join("online-gc.json"), &json!({"id":"pending"}))?;
+    ensure!(node.relocate(&[], &BTreeSet::new())?["deferred"] == "online GC active");
+    fs::remove_file(node.base.join("online-gc.json"))?;
+    let source = node.lower.join(paths[0].trim_start_matches('/'));
+    let unavailable = source.with_extension("unavailable");
+    fs::rename(&source, &unavailable)?;
+    ensure!(node.relocate(&[], &BTreeSet::new()).is_err());
+    ensure!(node.base.join("ready").exists());
+    ensure!(target(&node, &paths[0]).join("payload").metadata()?.len() == 262144);
+    fs::rename(&unavailable, &source)?;
     let gate = Lock::acquire(&node.base.join("maintenance.lock"), true)?;
     ensure!(node.relocate(&[], &BTreeSet::new())?["deferred"].is_string());
     drop(gate);
@@ -156,6 +166,10 @@ fn mounted_relocation_reclaims_payloads_and_recovers_crashes() -> Result<()> {
         .root
         .join("nix/var/nix/gcroots/distributed-nix-clients/pod-arc-live");
     symlink(&paths[1], roots.join("active"))?;
+    symlink(
+        "/nix/store/00000000000000000000000000000000-not-built",
+        roots.join("negative-lookup"),
+    )?;
     ensure!(node.relocate(&paths[..1], &BTreeSet::new())?["relocated"] == 0);
     ensure!(!linux::mountpoint(&target(&node, &paths[1]))?);
     drop(group);
@@ -212,6 +226,52 @@ fn mounted_relocation_reclaims_payloads_and_recovers_crashes() -> Result<()> {
         for path in &paths {
             linux::unmount(&target(&node, path))?;
         }
+    }
+
+    // Nondeterministic input-addressed outputs must never switch to different bytes.
+    let temp = tempfile::tempdir()?;
+    let (node, paths, _) = fixture(temp.path())?;
+    let variant = "/nix/store/00000000000000000000000000000000-variant".to_owned();
+    for (root, payload) in [(&node.origin, &paths[0]), (&node.root, &paths[1])] {
+        let mut info =
+            native::dump(&node.origin, std::slice::from_ref(payload))?.paths[payload].clone();
+        info["ca"] = serde_json::Value::Null;
+        let destination = root.join(variant.trim_start_matches('/'));
+        let source = node.origin.join(payload.trim_start_matches('/'));
+        if source.is_dir() {
+            fs::create_dir(&destination)?;
+            fs::copy(source.join("payload"), destination.join("payload"))?;
+        } else {
+            fs::copy(source, destination)?;
+        }
+        let manifest = distributed_nix::manifest::Manifest::parse(
+            json!({"version":1,"roots":[variant],"paths":{&variant:info}}),
+        )?;
+        native::register(root, &manifest)?;
+    }
+    let shared = native::dump(&node.origin, std::slice::from_ref(&variant))?;
+    let local = native::dump(&node.root, std::slice::from_ref(&variant))?;
+    let file = temp.path().join("variant.json");
+    durable(&file, &shared)?;
+    durable(
+        &node
+            .origin
+            .join(".distributed-nix-publications")
+            .join(format!("{}.json", shared.id()?)),
+        &shared,
+    )?;
+    ensure!(node.admit(&file, false)?["local_variants"] == json!([variant]));
+    ensure!(
+        !Admissions::open(&node.base.join("admissions"))?
+            .relocations()?
+            .contains_key(&variant)
+    );
+    node.relocate(&[], &BTreeSet::new())?;
+    ensure!(native::dump(&node.root, std::slice::from_ref(&variant))?.paths == local.paths);
+    ensure!(!linux::mountpoint(&target(&node, &variant))?);
+    ensure!(target(&node, &variant).metadata()?.len() == 262144);
+    for path in &paths {
+        linux::unmount(&target(&node, path))?;
     }
     Ok(())
 }
