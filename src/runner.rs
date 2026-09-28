@@ -40,6 +40,7 @@ pub struct Runtime {
     pub ready: PathBuf,
     pub poison: PathBuf,
     pub node: String,
+    pub slots: usize,
 }
 
 pub fn prepare() -> Result<()> {
@@ -65,6 +66,9 @@ pub fn prepare() -> Result<()> {
         ready: "/run/distributed-nix-ready".into(),
         poison: POISON.into(),
         node: std::env::var("DISTRIBUTED_NIX_NODE_NAME")?,
+        slots: std::env::var("DISTRIBUTED_NIX_ARC_SLOTS")
+            .unwrap_or_else(|_| "1".into())
+            .parse()?,
     };
     fs::write(CONFIG, serde_json::to_vec(&runtime)?)?;
     Ok(())
@@ -80,6 +84,11 @@ pub struct Service {
 }
 impl Service {
     pub fn new(token: &str, runtime: Option<Runtime>) -> Result<Self> {
+        let slots = runtime.as_ref().map_or(1, |r| r.slots);
+        ensure!(
+            slots > 0 && slots <= Semaphore::MAX_PERMITS,
+            "invalid ARC slot count"
+        );
         let starts = runtime.as_ref().map(|r| -> Result<_> {
             let db = Connection::open(&r.database)?;
             db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS starts (id TEXT PRIMARY KEY) STRICT;")?;
@@ -89,7 +98,7 @@ impl Service {
             token: Arc::new(format!("Bearer {token}").into_bytes()),
             runtime,
             starts,
-            slots: Arc::new(Semaphore::new(1)),
+            slots: Arc::new(Semaphore::new(slots)),
             poisoned: Arc::new(AtomicBool::new(false)),
         })
     }
@@ -446,87 +455,103 @@ mod tests {
             ready: base.join("ready"),
             poison: base.join("poison"),
             node: "test-node".into(),
+            slots: 1,
         }
     }
 
     #[tokio::test]
     async fn attachment_reserves_without_executing_and_disconnect_releases() -> Result<()> {
-        let dir = tempfile::tempdir()?;
-        let runtime = runtime(dir.path());
-        fs::write(&runtime.ready, b"")?;
-        let service = Service::new("test-token", Some(runtime.clone()))?;
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-        let address = listener.local_addr()?;
-        let server_service = service.clone();
-        let server = tokio::spawn(async move {
-            tonic::transport::Server::builder()
-                .add_service(RunnerPoolServer::new(server_service))
-                .serve_with_incoming(TcpListenerStream::new(listener))
-                .await
-        });
-        let mut client = RunnerPoolClient::connect(format!("http://{address}")).await?;
-        let request = |token: &str, id: &str| {
-            let (sender, receiver) = mpsc::channel(2);
-            sender
-                .try_send(RunnerInput {
-                    message: Some(runner_input::Message::Claim(RunnerClaim { id: id.into() })),
+        for capacity in [1, 4] {
+            let dir = tempfile::tempdir()?;
+            let mut runtime = runtime(dir.path());
+            runtime.slots = capacity;
+            fs::write(&runtime.ready, b"")?;
+            let service = Service::new("test-token", Some(runtime.clone()))?;
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+            let address = listener.local_addr()?;
+            let server_service = service.clone();
+            let server = tokio::spawn(async move {
+                tonic::transport::Server::builder()
+                    .add_service(RunnerPoolServer::new(server_service))
+                    .serve_with_incoming(TcpListenerStream::new(listener))
+                    .await
+            });
+            let mut client = RunnerPoolClient::connect(format!("http://{address}")).await?;
+            let request = |token: &str, id: &str| {
+                let (sender, receiver) = mpsc::channel(2);
+                sender
+                    .try_send(RunnerInput {
+                        message: Some(runner_input::Message::Claim(RunnerClaim { id: id.into() })),
+                    })
+                    .unwrap();
+                let mut request = Request::new(ReceiverStream::new(receiver));
+                request
+                    .metadata_mut()
+                    .insert("authorization", format!("Bearer {token}").parse().unwrap());
+                (sender, request)
+            };
+            let (_unauthorized, req) = request("wrong", "first");
+            assert_eq!(
+                client.attach(req).await.unwrap_err().code(),
+                tonic::Code::Unauthenticated
+            );
+            let (_invalid, req) = request("test-token", "../escape");
+            assert_eq!(
+                client.attach(req).await.unwrap_err().code(),
+                tonic::Code::InvalidArgument
+            );
+            let (input, req) = request("test-token", "first");
+            let mut events = client.attach(req).await?.into_inner();
+            assert_eq!(events.message().await?.unwrap().kind, Kind::Reserved as i32);
+            let mut other_reservations = Vec::new();
+            for i in 1..capacity {
+                let (input, req) = request("test-token", &format!("parallel-{i}"));
+                let mut stream = client.attach(req).await?.into_inner();
+                assert_eq!(stream.message().await?.unwrap().kind, Kind::Reserved as i32);
+                other_reservations.push((input, stream));
+            }
+            assert!(!runtime.work.exists());
+            assert_eq!(
+                service.starts.as_ref().unwrap().lock().unwrap().query_row(
+                    "SELECT count(*) FROM starts",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )?,
+                0
+            );
+            let (_busy, req) = request("test-token", "second");
+            assert_eq!(
+                client.attach(req).await.unwrap_err().code(),
+                tonic::Code::ResourceExhausted
+            );
+            drop(input);
+            assert!(events.message().await?.is_none());
+            drop(service.slots.acquire().await?);
+            let (input, req) = request("test-token", "second");
+            let mut events = client.attach(req).await?.into_inner();
+            assert_eq!(events.message().await?.unwrap().kind, Kind::Reserved as i32);
+            input
+                .send(RunnerInput {
+                    message: Some(runner_input::Message::Start(RunnerStart {
+                        jit_config: "not base64!".into(),
+                        user_agent: String::new(),
+                    })),
                 })
-                .unwrap();
-            let mut request = Request::new(ReceiverStream::new(receiver));
-            request
-                .metadata_mut()
-                .insert("authorization", format!("Bearer {token}").parse().unwrap());
-            (sender, request)
-        };
-        let (_unauthorized, req) = request("wrong", "first");
-        assert_eq!(
-            client.attach(req).await.unwrap_err().code(),
-            tonic::Code::Unauthenticated
-        );
-        let (_invalid, req) = request("test-token", "../escape");
-        assert_eq!(
-            client.attach(req).await.unwrap_err().code(),
-            tonic::Code::InvalidArgument
-        );
-        let (input, req) = request("test-token", "first");
-        let mut events = client.attach(req).await?.into_inner();
-        assert_eq!(events.message().await?.unwrap().kind, Kind::Reserved as i32);
-        assert!(!runtime.work.exists());
-        assert_eq!(
-            service.starts.as_ref().unwrap().lock().unwrap().query_row(
-                "SELECT count(*) FROM starts",
-                [],
-                |r| r.get::<_, i64>(0)
-            )?,
-            0
-        );
-        let (_busy, req) = request("test-token", "second");
-        assert_eq!(
-            client.attach(req).await.unwrap_err().code(),
-            tonic::Code::ResourceExhausted
-        );
-        drop(input);
-        assert!(events.message().await?.is_none());
-        drop(service.slots.acquire().await?);
-        let (input, req) = request("test-token", "second");
-        let mut events = client.attach(req).await?.into_inner();
-        assert_eq!(events.message().await?.unwrap().kind, Kind::Reserved as i32);
-        input
-            .send(RunnerInput {
-                message: Some(runner_input::Message::Start(RunnerStart {
-                    jit_config: "not base64!".into(),
-                    user_agent: String::new(),
-                })),
-            })
-            .await?;
-        assert_eq!(
-            events.message().await.unwrap_err().code(),
-            tonic::Code::InvalidArgument
-        );
-        drop(service.slots.acquire().await?);
-        assert!(!runtime.poison.exists());
-        assert!(!runtime.work.exists());
-        server.abort();
+                .await?;
+            assert_eq!(
+                events.message().await.unwrap_err().code(),
+                tonic::Code::InvalidArgument
+            );
+            drop(service.slots.acquire().await?);
+            assert!(!runtime.poison.exists());
+            assert!(!runtime.work.exists());
+            for (input, mut stream) in other_reservations {
+                drop(input);
+                assert!(stream.message().await?.is_none());
+            }
+            drop(service.slots.acquire_many(capacity as u32).await?);
+            server.abort();
+        }
         Ok(())
     }
 
@@ -534,6 +559,9 @@ mod tests {
     fn attempt_ids_survive_restart_and_cleanup_failure_poison_is_fail_closed() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let runtime = runtime(dir.path());
+        let mut invalid = runtime.clone();
+        invalid.slots = 0;
+        assert!(Service::new("token", Some(invalid)).is_err());
         let service = Service::new("token", Some(runtime.clone()))?;
         service.started("first")?;
         drop(service);

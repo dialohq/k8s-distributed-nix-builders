@@ -4,7 +4,11 @@ The optional `0.4.2-arc` builder image includes the official GitHub runner,
 `nix-fast-build`, and `rsync` on the job PATH. The ordinary image runs a thin `distributed-nix arc-client` in each ARC runner pod.
 ARC supplies its normal JIT configuration; the client reserves one builder over
 an authenticated bidirectional gRPC stream before sending that configuration.
-There is one runner slot per builder. Additional ARC pods wait for capacity.
+`builders.runnerSlots` controls concurrent jobs per builder (default: one).
+Additional ARC pods wait for capacity. Size ARC's maximum runner count against
+`builders.replicas * builders.runnerSlots`; attachment pods do not add capacity.
+Concurrent jobs have separate workspaces, Nix daemons, root leases and cgroups,
+and share the builder's Nix database, package paths and compute resources.
 
 All job execution happens in the builder pod. The shared package collection and
 each builder's SQLite database and workspace live on its PVC. Git caching is

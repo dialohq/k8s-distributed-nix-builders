@@ -60,6 +60,8 @@ spec:
                 fieldRef:
                   fieldPath: spec.nodeName
             {{- if eq $role "builder" }}
+            - name: DISTRIBUTED_NIX_ARC_SLOTS
+              value: {{ $.Values.builders.runnerSlots | quote }}
             - name: DISTRIBUTED_NIX_EXTRA_NIX_CONFIG
               value: {{ $.Values.builders.extraNixConfig | quote }}
             {{- end }}
