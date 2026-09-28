@@ -133,6 +133,10 @@ fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
+async fn roots(base: PathBuf, root: PathBuf, id: String) -> Result<crate::online::RootGroup> {
+    tokio::task::spawn_blocking(move || crate::online::group(&base, &root, Some(&id))).await?
+}
+
 // An interrupted/panicked handler cannot make a dirty slot available again.
 struct Slot {
     permit: Option<OwnedSemaphorePermit>,
@@ -328,11 +332,13 @@ impl RunnerPool for Service {
                     return;
                 }
             };
-            let roots = match crate::online::group(
-                Path::new(crate::node::BASE),
-                Path::new(crate::node::ROOT),
-                Some(&format!("arc-{}", claim.id)),
-            ) {
+            let roots = match roots(
+                crate::node::BASE.into(),
+                crate::node::ROOT.into(),
+                format!("arc-{}", claim.id),
+            )
+            .await
+            {
                 Ok(roots) => roots,
                 Err(error) => {
                     let _ = sender.send(Err(Status::internal(error.to_string()))).await;
@@ -397,6 +403,39 @@ mod tests {
     use super::*;
     use runner_pool_client::RunnerPoolClient;
     use tokio_stream::wrappers::TcpListenerStream;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn contended_root_lock_keeps_rpc_runtime_available() -> Result<()> {
+        use crate::util::Lock;
+        use std::{future::Future, task::Poll};
+        use tokio::io::AsyncWriteExt;
+
+        let dir = tempfile::tempdir()?;
+        let base = dir.path().join("metadata");
+        let root = dir.path().join("store");
+        let gate = Lock::acquire(&base.join("online-roots.lock"), false)?;
+        let mut acquisition = std::pin::pin!(roots(base, root, "arc-test".into()));
+        std::future::poll_fn(|cx| {
+            assert!(acquisition.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let transfer = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await?;
+            socket.write_all(b"R").await
+        });
+        let mut socket = tokio::net::TcpStream::connect(address).await?;
+        let mut byte = [0];
+        socket.read_exact(&mut byte).await?;
+        assert_eq!(byte, *b"R");
+        transfer.await??;
+        drop(gate);
+        drop(acquisition.await?);
+        Ok(())
+    }
 
     fn runtime(base: &Path) -> Runtime {
         Runtime {
