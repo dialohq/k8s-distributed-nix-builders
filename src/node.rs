@@ -289,11 +289,32 @@ impl Node {
             .map(|(p, _)| p.clone())
             .collect();
         crate::native::admit_local(&self.root, &m, &local, false)?;
-        roots(&self.root, m.paths.keys())?;
+        let restored = self.restore_paths(&state.plan)?;
+        failpoint("after-mounts");
+        let registered = crate::native::admit_local(&self.root, &m, &local, true)?;
+        failpoint("after-register");
+        let variants = registered["local_variants"]
+            .as_array()
+            .context("local variants")?;
+        admissions.queue_relocations(
+            &local
+                .iter()
+                .filter(|p| !variants.iter().any(|v| v.as_str() == Some(p.as_str())))
+                .map(|p| (p.clone(), m.paths[p].clone()))
+                .collect(),
+        )?;
+        admissions.commit(&id)?;
+        Ok(
+            json!({"batch":id,"records":registered["paths"],"local_variants":registered["local_variants"],"mounted":restored["mounted"],"small_file_bytes":restored["small_file_bytes"],"seconds":start.elapsed().as_secs_f64(),"recovered":recovery}),
+        )
+    }
+    fn restore_paths(&self, plan: &BTreeMap<String, Kind>) -> Result<Value> {
+        refresh_metadata(&self.lower.join("nix/store"))?;
+        roots(&self.root, plan.keys())?;
         let readonly = readonly_mounts(&fs::read_to_string("/proc/self/mountinfo")?);
         let mut copied = 0u64;
         let mut mounted = 0;
-        for (p, kind) in &state.plan {
+        for (p, kind) in plan {
             let src = physical(&self.lower, p);
             let dst = physical(&self.root, p);
             if *kind != Kind::Local {
@@ -362,23 +383,7 @@ impl Node {
             }
         }
         syncdir(&self.root.join("nix/store"))?;
-        failpoint("after-mounts");
-        let registered = crate::native::admit_local(&self.root, &m, &local, true)?;
-        failpoint("after-register");
-        let variants = registered["local_variants"]
-            .as_array()
-            .context("local variants")?;
-        admissions.queue_relocations(
-            &local
-                .iter()
-                .filter(|p| !variants.iter().any(|v| v.as_str() == Some(p.as_str())))
-                .map(|p| (p.clone(), m.paths[p].clone()))
-                .collect(),
-        )?;
-        admissions.commit(&id)?;
-        Ok(
-            json!({"batch":id,"records":registered["paths"],"local_variants":registered["local_variants"],"mounted":mounted,"small_file_bytes":copied,"seconds":start.elapsed().as_secs_f64(),"recovered":recovery}),
-        )
+        Ok(json!({"paths":plan.len(),"mounted":mounted,"small_file_bytes":copied}))
     }
     pub fn runtime(&self) -> Result<Value> {
         read_json(Path::new("/etc/distributed-nix/runtime.json"))
@@ -498,18 +503,61 @@ impl Node {
         Ok(())
     }
 
-    pub(crate) fn restore_admissions(&self) -> Result<Vec<Value>> {
+    /// Restore the prepared store view while startup holds the client maintenance fence.
+    pub fn restore_admissions(&self) -> Result<Value> {
         self.online_restore_checkpoint()?;
-        self.prepare(false)?;
-        let mut rows = Vec::new();
+        let start = Instant::now();
+        let (plan, mut report) = {
+            let _admit = Lock::acquire(&self.base.join("admit.lock"), false)?;
+            let plan = Admissions::open(&self.base.join("admissions"))?.plan()?;
+            let _gc = Lock::acquire(&self.root.join("nix/var/nix/gc.lock"), true)?;
+            let _paths = pathlocks(&self.root, plan.keys().cloned(), plan.len())?;
+            let report = self.restore_paths(&plan)?;
+            (plan, report)
+        };
+        failpoint("recovery-after-paths");
         let admissions = Admissions::open(&self.base.join("admissions"))?;
-        for id in admissions.ids()? {
+        let paths: Vec<_> = plan.keys().cloned().collect();
+        let valid: std::collections::BTreeSet<String> =
+            serde_json::from_value(crate::native::valid_paths(&self.root, &paths)?)?;
+        let mut missing: std::collections::BTreeSet<_> =
+            paths.into_iter().filter(|p| !valid.contains(p)).collect();
+        ensure!(
+            missing.iter().all(|p| plan[p] != Kind::Local),
+            "native metadata missing for retained local packages"
+        );
+        let pending = admissions.pending()?;
+        let pending_set: std::collections::BTreeSet<_> = pending.iter().cloned().collect();
+        let mut replayed = std::collections::BTreeSet::new();
+        for id in pending.into_iter().chain(if missing.is_empty() {
+            Vec::new()
+        } else {
+            admissions.ids()?
+        }) {
+            if replayed.contains(&id) || (missing.is_empty() && !pending_set.contains(&id)) {
+                continue;
+            }
             let state = admissions.get(&id)?.context("missing recovery batch")?;
+            if matches!(state.status, Status::Committed)
+                && !state.manifest.paths.keys().any(|p| missing.contains(p))
+            {
+                continue;
+            }
             let file = self.base.join("recovery-manifest.json");
             durable(&file, &state.manifest)?;
-            rows.push(self.admit(&file, true)?);
+            self.admit(&file, true)?;
+            for path in state.manifest.paths.keys() {
+                missing.remove(path);
+            }
+            replayed.insert(id);
         }
-        Ok(rows)
+        ensure!(
+            missing.is_empty(),
+            "native metadata missing without a recovery manifest"
+        );
+        report["replayed_batches"] = json!(replayed.len());
+        report["seconds"] = json!(start.elapsed().as_secs_f64());
+        Ok(report)
     }
     pub fn recover(&self) -> Result<Value> {
         let _gate = Lock::acquire(&self.base.join("maintenance.lock"), false)?;
@@ -522,12 +570,13 @@ impl Node {
             fs::remove_file(self.base.join("ready"))?;
             syncdir(&self.base)?;
         }
-        let rows = self.restore_admissions()?;
+        self.prepare(false)?;
+        let report = self.restore_admissions()?;
         durable(
             &self.base.join("ready"),
-            &json!({"recovered_batches":rows.len(),"boot_id":fs::read_to_string("/proc/sys/kernel/random/boot_id")?.trim()}),
+            &json!({"recovery":report,"boot_id":fs::read_to_string("/proc/sys/kernel/random/boot_id")?.trim()}),
         )?;
-        Ok(json!({"recovered":rows}))
+        Ok(json!({"recovered":report}))
     }
     pub fn publication(&self, file: &Path, commit: bool) -> Result<Value> {
         let m = Manifest::read(file)?;

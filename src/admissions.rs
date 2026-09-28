@@ -219,6 +219,34 @@ impl Admissions {
             .collect::<rusqlite::Result<_>>()?)
     }
 
+    pub fn pending(&self) -> Result<Vec<String>> {
+        Ok(self
+            .0
+            .prepare("SELECT id FROM batches WHERE committed=0 ORDER BY id")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn plan(&self) -> Result<BTreeMap<String, Kind>> {
+        let rows = self
+            .0
+            .prepare("SELECT path,kind FROM paths ORDER BY path")?
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter()
+            .map(|(path, kind)| {
+                ensure!(
+                    crate::manifest::valid_path(&path),
+                    "invalid indexed store path"
+                );
+                Ok((
+                    path,
+                    serde_json::from_value(serde_json::Value::String(kind))?,
+                ))
+            })
+            .collect()
+    }
+
     pub fn for_each(&self, mut visit: impl FnMut(Journal) -> Result<()>) -> Result<()> {
         for id in self.ids()? {
             visit(self.get(&id)?.expect("fenced admission batch"))?;

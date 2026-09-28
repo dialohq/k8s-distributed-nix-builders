@@ -47,6 +47,9 @@ fn subprocess() -> Result<()> {
         "admit" => {
             node(directory).admit(&directory.join("manifest.json"), false)?;
         }
+        "recover" => {
+            node(directory).restore_admissions()?;
+        }
         _ => panic!("unknown test action"),
     }
     Ok(())
@@ -168,7 +171,8 @@ fn native_admission_recovers_every_durable_boundary() -> Result<()> {
         let db = Admissions::open(&node.base.join("admissions"))?;
         ensure!(matches!(db.get(&id)?.unwrap().status, Status::Pending));
         drop(db);
-        node.admit(&temp.path().join("manifest.json"), true)?;
+        ensure!(node.restore_admissions()?["replayed_batches"] == 1);
+        ensure!(node.restore_admissions()?["replayed_batches"] == 0);
         node.admit(&temp.path().join("manifest.json"), false)?;
         ensure!(native::dump(&node.root, &[path.clone()])?.paths == manifest.paths);
         ensure!(fs::read(node.root.join(path.trim_start_matches('/')))? == fs::read(input)?);
@@ -210,6 +214,24 @@ fn later_batches_preserve_shared_and_local_path_classification() -> Result<()> {
     ensure!(journal.plan[&paths[0]] == Kind::Copy);
     ensure!(journal.plan[&paths[1]] == Kind::Local);
     ensure!(db.ids()?.len() == 2);
+    let connection = rusqlite::Connection::open(node.root.join("nix/var/nix/db/db.sqlite"))?;
+    let before: i64 = connection.query_row("PRAGMA data_version", [], |r| r.get(0))?;
+    let recovered = node.restore_admissions()?;
+    ensure!(recovered["paths"] == 2);
+    ensure!(recovered["replayed_batches"] == 0);
+    let after: i64 = connection.query_row("PRAGMA data_version", [], |r| r.get(0))?;
+    ensure!(
+        before == after,
+        "normal recovery rewrote native Nix metadata"
+    );
+    child(temp.path(), "recover", "recovery-after-paths")?;
+    ensure!(node.restore_admissions()?["replayed_batches"] == 0);
+    // Missing shared metadata can be reconstructed; local variants cannot be guessed.
+    connection.execute("DELETE FROM ValidPaths WHERE path=?1", [&paths[0]])?;
+    ensure!(node.restore_admissions()?["replayed_batches"] == 1);
+    ensure!(native::dump(&node.root, &paths)?.paths == next.paths);
+    connection.execute("DELETE FROM ValidPaths WHERE path=?1", [&paths[1]])?;
+    ensure!(node.restore_admissions().is_err());
     Ok(())
 }
 
@@ -293,7 +315,10 @@ fn mounted_paths_recover_and_concurrent_admissions_keep_their_kinds() -> Result<
             output(Command::new("umount").arg(target))?;
         }
     }
-    node.admit(&file, true)?;
+    let restored = node.restore_admissions()?;
+    ensure!(restored["paths"] == 4);
+    ensure!(restored["mounted"] == 2);
+    ensure!(restored["replayed_batches"] == 0);
     std::thread::scope(|scope| -> Result<()> {
         let handles: Vec<_> = (0..8)
             .map(|_| scope.spawn(|| node.admit(&file, false)))
