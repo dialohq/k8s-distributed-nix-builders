@@ -43,6 +43,7 @@ impl Admissions {
             }
         }
         connection.execute_batch("CREATE TABLE IF NOT EXISTS relocations (path TEXT PRIMARY KEY NOT NULL, info TEXT NOT NULL) WITHOUT ROWID;")?;
+        connection.execute_batch("CREATE TABLE IF NOT EXISTS relocated_paths (path TEXT PRIMARY KEY NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('mount-dir','mount-file'))) WITHOUT ROWID;")?;
         Ok(Self(connection))
     }
 
@@ -51,7 +52,10 @@ impl Admissions {
             .0
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         for (path, info) in paths {
-            tx.execute("INSERT INTO relocations VALUES (?1,?2) ON CONFLICT(path) DO NOTHING", params![path, serde_json::to_string(info)?])?;
+            tx.execute(
+                "INSERT INTO relocations VALUES (?1,?2) ON CONFLICT(path) DO NOTHING",
+                params![path, serde_json::to_string(info)?],
+            )?;
         }
         tx.commit()?;
         Ok(())
@@ -72,11 +76,18 @@ impl Admissions {
         let tx = self
             .0
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let replacements = serde_json::to_string(kinds)?;
-        // Update only keys already in each batch; manifests remain unchanged.
-        tx.execute("UPDATE batches SET plan=(SELECT json_group_object(key, coalesce(json_extract(?1, '$.\"' || key || '\"'), value)) FROM json_each(batches.plan)) WHERE EXISTS (SELECT 1 FROM json_each(batches.plan) p JOIN json_each(?1) n ON p.key=n.key)", [&replacements])?;
         for (path, kind) in kinds {
+            ensure!(
+                matches!(kind, Kind::Local | Kind::MountDir | Kind::MountFile),
+                "invalid relocation transition"
+            );
             let kind = serde_json::to_value(kind)?.as_str().unwrap().to_owned();
+            let previous: String =
+                tx.query_row("SELECT kind FROM paths WHERE path=?1", [path], |r| r.get(0))?;
+            ensure!(
+                previous == "local" || previous == kind,
+                "invalid previous relocation kind"
+            );
             ensure!(
                 tx.execute(
                     "UPDATE paths SET kind=?2 WHERE path=?1",
@@ -84,6 +95,9 @@ impl Admissions {
                 )? == 1,
                 "missing relocated path"
             );
+            if kind != "local" {
+                tx.execute("INSERT INTO relocated_paths VALUES (?1,?2) ON CONFLICT(path) DO UPDATE SET kind=excluded.kind", params![path, kind])?;
+            }
             tx.execute("DELETE FROM relocations WHERE path=?1", [path])?;
         }
         failpoint("relocation-before-database-commit");
@@ -145,7 +159,7 @@ impl Admissions {
             )
             .optional()?;
         row.map(|(manifest, plan, committed)| {
-            let journal = Journal {
+            let mut journal = Journal {
                 manifest: serde_json::from_str(&manifest)?,
                 plan: serde_json::from_str(&plan)?,
                 status: if committed {
@@ -155,6 +169,20 @@ impl Admissions {
                 },
             };
             journal.validate(id)?;
+            // Batch plans are immutable; one indexed transition applies to every
+            // overlapping batch without rewriting their complete JSON manifests.
+            let mut transition = self
+                .0
+                .prepare("SELECT kind FROM relocated_paths WHERE path=?1")?;
+            for (path, kind) in &mut journal.plan {
+                if *kind == Kind::Local {
+                    let relocated: Option<String> =
+                        transition.query_row([path], |r| r.get(0)).optional()?;
+                    if let Some(relocated) = relocated {
+                        *kind = serde_json::from_value(serde_json::Value::String(relocated))?;
+                    }
+                }
+            }
             ensure!(
                 self.known(journal.plan.keys())? == journal.plan,
                 "admission index differs from batch plan"

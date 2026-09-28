@@ -95,6 +95,40 @@ fn corrupt_index_data_fail_closed() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn relocation_updates_overlapping_batches_without_rewriting_them() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut db = Admissions::open(temp.path())?;
+    let first = journal("first", Kind::Local);
+    let mut second = journal("second", Kind::Local);
+    second.manifest.paths.extend(first.manifest.paths.clone());
+    second.plan.extend(first.plan.clone());
+    db.begin(&first)?;
+    db.begin(&second)?;
+    let connection = rusqlite::Connection::open(temp.path().join("admissions.sqlite"))?;
+    let id = first.manifest.id()?;
+    let original: String =
+        connection.query_row("SELECT plan FROM batches WHERE id=?1", [&id], |r| r.get(0))?;
+    connection.execute("UPDATE paths SET kind='mount-dir'", [])?;
+    ensure!(db.get(&id).is_err());
+    connection.execute("UPDATE paths SET kind='local'", [])?;
+    let path = first.plan.keys().next().unwrap();
+    let changes = BTreeMap::from([(path.clone(), Kind::MountDir)]);
+    db.relocated(&changes)?;
+    db.relocated(&changes)?;
+    for batch in [&first, &second] {
+        ensure!(db.get(&batch.manifest.id()?)?.unwrap().plan[path] == Kind::MountDir);
+    }
+    let unchanged: String =
+        connection.query_row("SELECT plan FROM batches WHERE id=?1", [&id], |r| r.get(0))?;
+    ensure!(original == unchanged);
+    let checkpoint = tempfile::tempdir()?;
+    let mut compacted = Admissions::open(checkpoint.path())?;
+    db.for_each(|journal| compacted.begin(&journal))?;
+    ensure!(compacted.get(&id)?.unwrap().plan == changes);
+    Ok(())
+}
+
 fn node(directory: &Path) -> Node {
     Node {
         base: directory.join("state"),
