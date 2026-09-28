@@ -369,7 +369,8 @@ impl Node {
             .as_array()
             .context("local variants")?;
         admissions.queue_relocations(
-            &local.iter()
+            &local
+                .iter()
                 .filter(|p| !variants.iter().any(|v| v.as_str() == Some(p.as_str())))
                 .map(|p| (p.clone(), m.paths[p].clone()))
                 .collect(),
@@ -511,10 +512,11 @@ impl Node {
         Ok(rows)
     }
     pub fn recover(&self) -> Result<Value> {
+        let _gate = Lock::acquire(&self.base.join("maintenance.lock"), false)?;
         if self.base.join("relocation.json").exists() {
             self.prepare(false)?;
         }
-        self.resume_relocation()?;
+        self.resume_relocation_locked()?;
         let _clients = Lock::acquire(&self.base.join("clients.lock"), false)?;
         if self.base.join("ready").exists() {
             fs::remove_file(self.base.join("ready"))?;
@@ -628,8 +630,17 @@ impl Node {
             });
         }
         if op == "recover" {
-            let _gate = Lock::acquire(&self.base.join("maintenance.lock"), false)?;
             return self.recover();
+        }
+        if op == "resume-relocation" {
+            if self.base.join("relocation.json").exists() {
+                self.prepare(false)?;
+            }
+            self.resume_relocation()?;
+            return Ok(json!({"resumed":true}));
+        }
+        if op == "relocator" {
+            return self.relocator();
         }
         let _gate = Lock::acquire(&self.base.join("maintenance.lock"), true)?;
         match op {
@@ -665,15 +676,6 @@ impl Node {
                 )?)?)
             }
             "admit" => self.admit(Path::new(arg(args, 1)?), false),
-            "recover" => self.recover(),
-            "resume-relocation" => {
-                if self.base.join("relocation.json").exists() {
-                    self.prepare(false)?;
-                }
-                self.resume_relocation()?;
-                Ok(json!({"resumed":true}))
-            }
-            "relocator" => self.relocator(),
             "prepare" => {
                 self.prepare(false)?;
                 Ok(json!({"prepared":true}))

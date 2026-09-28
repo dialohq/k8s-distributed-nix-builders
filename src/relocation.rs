@@ -24,6 +24,10 @@ impl Node {
     // Called before admitting clients after a crash, including before runtime seeding.
     pub fn resume_relocation(&self) -> Result<()> {
         let _gate = Lock::acquire(&self.base.join("maintenance.lock"), false)?;
+        self.resume_relocation_locked()
+    }
+
+    pub(crate) fn resume_relocation_locked(&self) -> Result<()> {
         let _operation = Lock::acquire(&self.base.join("online-operation.lock"), false)?;
         let _admit = Lock::acquire(&self.base.join("admit.lock"), false)?;
         self.online_restore_checkpoint()?;

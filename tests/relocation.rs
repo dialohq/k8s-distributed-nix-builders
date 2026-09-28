@@ -147,6 +147,7 @@ fn mounted_relocation_reclaims_payloads_and_recovers_crashes() -> Result<()> {
     }
     let temp = tempfile::tempdir()?;
     let (node, paths, file) = fixture(temp.path())?;
+    ensure!(node.dispatch(&["resume-relocation".to_owned()])?["resumed"] == true);
     let metadata = native::dump(&node.root, &paths)?;
     durable(&node.base.join("online-gc.json"), &json!({"id":"pending"}))?;
     ensure!(node.relocate(&[], &BTreeSet::new())?["deferred"] == "online GC active");
