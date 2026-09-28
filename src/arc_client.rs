@@ -3,7 +3,7 @@ use crate::online_rpc::{
     Config,
     wire::{runner_pool_client::RunnerPoolClient, *},
 };
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::{fs, io::Write, path::PathBuf, time::Duration};
 use tokio::{
@@ -11,7 +11,46 @@ use tokio::{
     sync::mpsc,
 };
 use tokio_stream::wrappers::ReceiverStream;
-use tonic::{Request, transport::Endpoint};
+use tonic::{Request, Status, transport::Endpoint};
+
+type Reservation = (mpsc::Sender<RunnerInput>, tonic::Streaming<RunnerEvent>);
+
+async fn reserve(
+    address: &str,
+    id: &str,
+    token: tonic::metadata::MetadataValue<tonic::metadata::Ascii>,
+) -> Result<Reservation, Status> {
+    let endpoint = Endpoint::from_shared(format!("http://{address}"))
+        .map_err(|e| Status::invalid_argument(e.to_string()))?
+        .connect_timeout(Duration::from_secs(5))
+        .http2_keep_alive_interval(Duration::from_secs(20))
+        .keep_alive_timeout(Duration::from_secs(10))
+        .keep_alive_while_idle(true);
+    let channel = endpoint
+        .connect()
+        .await
+        .map_err(|e| Status::unavailable(e.to_string()))?;
+    let mut client = RunnerPoolClient::new(channel);
+    let (sender, receiver) = mpsc::channel(2);
+    sender
+        .try_send(RunnerInput {
+            message: Some(runner_input::Message::Claim(RunnerClaim { id: id.into() })),
+        })
+        .map_err(|e| Status::internal(e.to_string()))?;
+    let mut request = Request::new(ReceiverStream::new(receiver));
+    request.metadata_mut().insert("authorization", token);
+    let mut response = client.attach(request).await?.into_inner();
+    if !response
+        .message()
+        .await?
+        .is_some_and(|message| message.kind == runner_event::Kind::Reserved as i32)
+    {
+        return Err(Status::failed_precondition(
+            "builder did not reserve a slot",
+        ));
+    }
+    Ok((sender, response))
+}
 
 #[derive(Deserialize)]
 struct Pool {
@@ -53,53 +92,33 @@ pub async fn run() -> Result<i32> {
     };
     tokio::pin!(stopping);
     eprintln!("Waiting for a warm Nix builder");
+    let mut last_wait = Vec::new();
     loop {
+        let mut waiting = Vec::new();
         for i in 0..config.nodes.len() {
             let address = &config.nodes[(offset + i) % config.nodes.len()];
-            let endpoint = Endpoint::from_shared(format!("http://{address}"))?
-                .connect_timeout(Duration::from_secs(5))
-                .http2_keep_alive_interval(Duration::from_secs(20))
-                .keep_alive_timeout(Duration::from_secs(10))
-                .keep_alive_while_idle(true);
-            let connection = endpoint.connect();
-            let channel = tokio::select! {
+            let reservation = tokio::select! {
                 _ = &mut stopping => return Ok(143),
-                result = connection => match result { Ok(channel) => channel, Err(_) => continue },
+                result = tokio::time::timeout(Duration::from_secs(5), reserve(address, &id, token.clone())) => {
+                    result.unwrap_or_else(|_| Err(Status::deadline_exceeded("reservation timed out")))
+                },
             };
-            let mut client = RunnerPoolClient::new(channel);
-            let (sender, receiver) = mpsc::channel(2);
-            sender
-                .send(RunnerInput {
-                    message: Some(runner_input::Message::Claim(RunnerClaim { id: id.clone() })),
-                })
-                .await?;
-            let mut request = Request::new(ReceiverStream::new(receiver));
-            request
-                .metadata_mut()
-                .insert("authorization", token.clone());
-            let response = tokio::select! {
-                _ = &mut stopping => return Ok(143),
-                response = client.attach(request) => response,
-            };
-            let mut response = match response {
-                Ok(response) => response.into_inner(),
+            let (sender, mut response) = match reservation {
+                Ok(reservation) => reservation,
                 Err(status)
                     if matches!(
                         status.code(),
                         tonic::Code::Unavailable
                             | tonic::Code::ResourceExhausted
                             | tonic::Code::Unimplemented
+                            | tonic::Code::DeadlineExceeded
                     ) =>
                 {
+                    waiting.push(format!("{address}: {}", status.message()));
                     continue;
                 }
                 Err(status) => return Err(status.into()),
             };
-            let first = tokio::select! { _ = &mut stopping => return Ok(143), message = response.message() => message? };
-            ensure!(
-                first.is_some_and(|message| message.kind == runner_event::Kind::Reserved as i32),
-                "builder did not reserve a slot"
-            );
             sender
                 .send(RunnerInput {
                     message: Some(runner_input::Message::Start(RunnerStart {
@@ -121,6 +140,10 @@ pub async fn run() -> Result<i32> {
                     runner_event::Kind::Reserved => anyhow::bail!("duplicate reservation"),
                 }
             }
+        }
+        if waiting != last_wait {
+            eprintln!("Builder availability: {}", waiting.join("; "));
+            last_wait = waiting;
         }
         tokio::select! { _ = &mut stopping => return Ok(143), _ = tokio::time::sleep(Duration::from_secs(1)) => () }
     }
