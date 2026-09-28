@@ -146,7 +146,7 @@ fn mounted_relocation_reclaims_payloads_and_recovers_crashes() -> Result<()> {
         return Ok(());
     }
     let temp = tempfile::tempdir()?;
-    let (node, paths, file) = fixture(temp.path())?;
+    let (node, paths, _) = fixture(temp.path())?;
     ensure!(node.dispatch(&["resume-relocation".to_owned()])?["resumed"] == true);
     let metadata = native::dump(&node.root, &paths)?;
     durable(&node.base.join("online-gc.json"), &json!({"id":"pending"}))?;
@@ -188,7 +188,7 @@ fn mounted_relocation_reclaims_payloads_and_recovers_crashes() -> Result<()> {
             ensure!(to.metadata()?.len() == 0);
         }
     }
-    node.admit(&file, true)?;
+    ensure!(node.restore_admissions()?["replayed_batches"] == 0);
     verify(&node, &paths)?;
     for path in &paths {
         linux::unmount(&target(&node, path))?;
