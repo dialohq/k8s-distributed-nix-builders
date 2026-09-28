@@ -376,6 +376,10 @@ async fn start(role: Role, processes: &mut Processes, nfs: &mut KernelNfs) -> Re
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
     }
+    processes.run(
+        "resume store relocation",
+        &mut controller(&["node", "resume-relocation"])?,
+    ).await?;
     seed(processes, ROOT).await?;
     processes
         .run(
@@ -439,6 +443,9 @@ async fn start(role: Role, processes: &mut Processes, nfs: &mut KernelNfs) -> Re
         }
     }
     fs::write("/run/distributed-nix-ready", b"")?;
+    if role == Role::Builder {
+        processes.daemon("published store relocation", &mut controller(&["node", "relocator"])?)?;
+    }
     Ok(())
 }
 

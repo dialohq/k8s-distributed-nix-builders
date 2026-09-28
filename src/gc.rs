@@ -175,6 +175,9 @@ impl Node {
                 fs::remove_dir_all(&next)?;
             }
             let mut checkpoint = Admissions::open(&next)?;
+            let queued = Admissions::open(&active)?.relocations()?
+                .into_iter().filter(|(path, _)| retain(path)).collect();
+            checkpoint.queue_relocations(&queued)?;
             if !paths.is_empty() {
                 let m = Manifest {
                     version: 1,
@@ -295,6 +298,7 @@ mod checkpoint_tests {
             };
             let active = node.base.join("admissions");
             Admissions::open(&active)?.begin(&journal)?;
+            Admissions::open(&active)?.queue_relocations(&journal.manifest.paths)?;
             let status = Command::new(std::env::current_exe()?)
                 .args([
                     "--exact",
@@ -319,6 +323,7 @@ mod checkpoint_tests {
             ensure!(retained.manifest.realisations == journal.manifest.realisations);
             let dead = vec![DEAD.to_owned()];
             ensure!(db.known(&dead)?.is_empty());
+            ensure!(db.relocations()?.keys().cloned().collect::<Vec<_>>() == vec![KEEP.to_owned()]);
             drop(db);
             let retired = Admissions::open(&node.gc_epoch(EPOCH)?.join("old-admissions"))?;
             ensure!(retired.known(&dead)?[DEAD] == Kind::Copy);

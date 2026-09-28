@@ -328,6 +328,17 @@ impl RunnerPool for Service {
                     return;
                 }
             };
+            let roots = match crate::online::group(
+                Path::new(crate::node::BASE),
+                Path::new(crate::node::ROOT),
+                Some(&format!("arc-{}", claim.id)),
+            ) {
+                Ok(roots) => roots,
+                Err(error) => {
+                    let _ = sender.send(Err(Status::internal(error.to_string()))).await;
+                    return;
+                }
+            };
             let result = async {
                 fs::create_dir(&work)?;
                 fs::set_permissions(&work, fs::Permissions::from_mode(0o700))?;
@@ -355,6 +366,8 @@ impl RunnerPool for Service {
             }
             .await;
             if let Err(error) = cleanup {
+                // Keep pins until this poisoned builder exits if descendants remain.
+                std::mem::forget(roots);
                 eprintln!("ARC cleanup failed: {error:#}");
                 let _ = sender
                     .send(Err(Status::internal(
@@ -363,6 +376,7 @@ impl RunnerPool for Service {
                     .await;
                 return;
             }
+            drop(roots);
             slot.release();
             let reply = match result {
                 Ok(code) => {

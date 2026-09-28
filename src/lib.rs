@@ -1,4 +1,5 @@
 pub mod admissions;
+pub mod relocation;
 pub mod cluster;
 pub mod manifest;
 pub mod native;

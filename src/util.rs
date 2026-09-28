@@ -91,6 +91,19 @@ pub fn durable(p: &Path, v: &impl serde::Serialize) -> Result<()> {
 }
 pub struct Lock(File);
 impl Lock {
+    pub fn try_exclusive(p: &Path) -> Result<Option<Self>> {
+        fs::create_dir_all(p.parent().context("lock parent")?)?;
+        let f = OpenOptions::new().create(true).truncate(false).read(true).write(true).open(p)?;
+        if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Ok(Some(Self(f)));
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::WouldBlock {
+            Ok(None)
+        } else {
+            Err(error.into())
+        }
+    }
     pub fn inherited_fd(self) -> Result<i32> {
         let fd = self.0.as_raw_fd();
         // SAFETY: this live descriptor intentionally outlives exec in a worker.
