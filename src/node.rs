@@ -167,7 +167,11 @@ pub(crate) fn journals(d: &Path) -> Result<Vec<PathBuf>> {
     ps.sort();
     Ok(ps)
 }
-fn pathlocks(root: &Path, paths: impl Iterator<Item = String>, count: usize) -> Result<Vec<Lock>> {
+pub(crate) fn pathlocks(
+    root: &Path,
+    paths: impl Iterator<Item = String>,
+    count: usize,
+) -> Result<Vec<Lock>> {
     // SAFETY: initialized rlimit pointer, platform constants supplied by libc.
     unsafe {
         let mut limit: libc::rlimit = std::mem::zeroed();
@@ -361,6 +365,15 @@ impl Node {
         failpoint("after-mounts");
         let registered = crate::native::admit_local(&self.root, &m, &local, true)?;
         failpoint("after-register");
+        let variants = registered["local_variants"]
+            .as_array()
+            .context("local variants")?;
+        admissions.queue_relocations(
+            &local.iter()
+                .filter(|p| !variants.iter().any(|v| v.as_str() == Some(p.as_str())))
+                .map(|p| (p.clone(), m.paths[p].clone()))
+                .collect(),
+        )?;
         admissions.commit(&id)?;
         Ok(
             json!({"batch":id,"records":registered["paths"],"local_variants":registered["local_variants"],"mounted":mounted,"small_file_bytes":copied,"seconds":start.elapsed().as_secs_f64(),"recovered":recovery}),
@@ -498,6 +511,10 @@ impl Node {
         Ok(rows)
     }
     pub fn recover(&self) -> Result<Value> {
+        if self.base.join("relocation.json").exists() {
+            self.prepare(false)?;
+        }
+        self.resume_relocation()?;
         let _clients = Lock::acquire(&self.base.join("clients.lock"), false)?;
         if self.base.join("ready").exists() {
             fs::remove_file(self.base.join("ready"))?;
@@ -649,6 +666,14 @@ impl Node {
             }
             "admit" => self.admit(Path::new(arg(args, 1)?), false),
             "recover" => self.recover(),
+            "resume-relocation" => {
+                if self.base.join("relocation.json").exists() {
+                    self.prepare(false)?;
+                }
+                self.resume_relocation()?;
+                Ok(json!({"resumed":true}))
+            }
+            "relocator" => self.relocator(),
             "prepare" => {
                 self.prepare(false)?;
                 Ok(json!({"prepared":true}))

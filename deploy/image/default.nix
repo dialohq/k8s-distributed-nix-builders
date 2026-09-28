@@ -31,7 +31,7 @@
   '';
 in pkgs.dockerTools.buildLayeredImage {
   name = "ghcr.io/dialohq/k8s-distributed-nix-builders";
-  tag = if githubRunner == null then "0.4.2" else "0.4.2-arc";
+  tag = if githubRunner == null then "0.4.3" else "0.4.3-arc";
   contents = runtime ++ [files pkgs.path];
   includeNixDB = true;
   maxLayers = 100;
@@ -52,7 +52,7 @@ in pkgs.dockerTools.buildLayeredImage {
   config = {
     Labels = {
       "org.opencontainers.image.source" = "https://github.com/dialohq/k8s-distributed-nix-builders";
-      "org.opencontainers.image.version" = "0.4.2";
+      "org.opencontainers.image.version" = "0.4.3";
     };
     Entrypoint = ["${pkgs.tini}/bin/tini" "--" "${package}/bin/distributed-nix" "pod"];
     Env = ["PATH=${pkgs.lib.makeBinPath runtime}" "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt" "NIX_SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt" "NIX_CONFIG=experimental-features = nix-command flakes ca-derivations" "DISTRIBUTED_NIX_ONLINE_CONFIG=/run/distributed-nix-config.json"];

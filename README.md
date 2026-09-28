@@ -9,7 +9,7 @@ nodes meet the [kernel and storage requirements](#requirements-and-current-bound
 
 ```sh
 helm upgrade --install nix-builders \
-  oci://ghcr.io/dialohq/charts/k8s-distributed-nix-builders --version 0.4.2 \
+  oci://ghcr.io/dialohq/charts/k8s-distributed-nix-builders --version 0.4.3 \
   --namespace nix-builders --create-namespace \
   --set store.storageClass=YOUR_BLOCK_STORAGE_CLASS \
   --set builders.storageClass=YOUR_BLOCK_STORAGE_CLASS
@@ -31,7 +31,7 @@ flowchart LR
   S --> P
 ```
 
-Each builder retains its own writable store, SQLite database, admission journal, and recovery state. Completed outputs are copied once to the shared collection using native Nix transfer streams over gRPC. Peers register their metadata and bind-mount shared paths into their local store view. SQLite files never live on NFS. Builds execute inside the builder pod; no host Nix installation, host store mount, SSH transport, host daemon, or Kubernetes API access is required.
+Each builder retains its own writable store, SQLite database, admission journal, and recovery state. Completed outputs are copied once to the shared collection using native Nix transfer streams over gRPC. Peers register their metadata and bind-mount shared paths into their local store view. After publication, builders reclaim matching local package directories and large files and replace them with read-only mounts of the shared copy. Live job/client roots and the runtime closure protect files still in use. Tiny standalone files and symlinks remain local, as do nondeterministic local variants that differ from the shared package. A durable relocation record finishes interrupted moves before clients can reconnect. SQLite files never live on NFS. Builds execute inside the builder pod; no host Nix installation, host store mount, SSH transport, host daemon, or Kubernetes API access is required.
 
 The `distributed-nix pod` Rust supervisor owns startup, readiness and child shutdown.
 Mounts use Linux syscalls; kernel NFSD uses its control filesystem; runtime seeding

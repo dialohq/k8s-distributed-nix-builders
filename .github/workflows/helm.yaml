@@ -43,7 +43,7 @@ jobs:
           helm upgrade --install e2e ./deploy/chart --namespace nix-builders --create-namespace \
             --set store.resources.requests.cpu=100m --set builders.resources.requests.cpu=100m \
             --set store.resources.requests.memory=256Mi --set builders.resources.requests.memory=256Mi \
-            --set builders.image=ghcr.io/dialohq/k8s-distributed-nix-builders:0.4.2-arc \
+            --set builders.image=ghcr.io/dialohq/k8s-distributed-nix-builders:0.4.3-arc \
             --set store.storage=10Gi --set builders.storage=10Gi \
             --set gc.intervalSeconds=86400 --wait --timeout 15m
           helm test e2e --namespace nix-builders --logs
@@ -65,8 +65,8 @@ jobs:
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GHCR_USER" --password-stdin
           printf '%s' "$GHCR_TOKEN" | helm registry login ghcr.io --username "$GHCR_USER" --password-stdin
           docker load --input "$(readlink -f image)"
-          docker push ghcr.io/dialohq/k8s-distributed-nix-builders:0.4.2
+          docker push ghcr.io/dialohq/k8s-distributed-nix-builders:0.4.3
           docker load --input "$(readlink -f arc-image)"
-          docker push ghcr.io/dialohq/k8s-distributed-nix-builders:0.4.2-arc
+          docker push ghcr.io/dialohq/k8s-distributed-nix-builders:0.4.3-arc
           helm package deploy/chart --destination /tmp
-          helm push /tmp/k8s-distributed-nix-builders-0.4.2.tgz oci://ghcr.io/dialohq/charts
+          helm push /tmp/k8s-distributed-nix-builders-0.4.3.tgz oci://ghcr.io/dialohq/charts

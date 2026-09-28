@@ -42,7 +42,53 @@ impl Admissions {
                 syncdir(parent)?;
             }
         }
+        connection.execute_batch("CREATE TABLE IF NOT EXISTS relocations (path TEXT PRIMARY KEY NOT NULL, info TEXT NOT NULL) WITHOUT ROWID;")?;
         Ok(Self(connection))
+    }
+
+    pub fn queue_relocations(&mut self, paths: &BTreeMap<String, serde_json::Value>) -> Result<()> {
+        let tx = self
+            .0
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for (path, info) in paths {
+            tx.execute("INSERT INTO relocations VALUES (?1,?2) ON CONFLICT(path) DO NOTHING", params![path, serde_json::to_string(info)?])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn relocations(&self) -> Result<BTreeMap<String, serde_json::Value>> {
+        let rows = self
+            .0
+            .prepare("SELECT path,info FROM relocations ORDER BY path")?
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter()
+            .map(|(path, info)| Ok((path, serde_json::from_str(&info)?)))
+            .collect()
+    }
+
+    pub fn relocated(&mut self, kinds: &BTreeMap<String, Kind>) -> Result<()> {
+        let tx = self
+            .0
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let replacements = serde_json::to_string(kinds)?;
+        // Update only keys already in each batch; manifests remain unchanged.
+        tx.execute("UPDATE batches SET plan=(SELECT json_group_object(key, coalesce(json_extract(?1, '$.\"' || key || '\"'), value)) FROM json_each(batches.plan)) WHERE EXISTS (SELECT 1 FROM json_each(batches.plan) p JOIN json_each(?1) n ON p.key=n.key)", [&replacements])?;
+        for (path, kind) in kinds {
+            let kind = serde_json::to_value(kind)?.as_str().unwrap().to_owned();
+            ensure!(
+                tx.execute(
+                    "UPDATE paths SET kind=?2 WHERE path=?1",
+                    params![path, kind]
+                )? == 1,
+                "missing relocated path"
+            );
+            tx.execute("DELETE FROM relocations WHERE path=?1", [path])?;
+        }
+        failpoint("relocation-before-database-commit");
+        tx.commit()?;
+        Ok(())
     }
 
     fn insert(connection: &Connection, journal: &Journal) -> Result<()> {

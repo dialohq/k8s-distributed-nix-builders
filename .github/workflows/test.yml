@@ -19,3 +19,5 @@ jobs:
         run: sudo "$(command -v nix)" --option build-users-group '' develop path:. -c cargo test --test admissions mounted_paths -- --ignored --nocapture
       - name: Privileged ARC process cleanup
         run: sudo "$(command -v nix)" --option build-users-group '' develop path:. -c cargo test --test runner_cgroup -- --ignored --nocapture
+      - name: Published package relocation and crash recovery
+        run: sudo "$(command -v nix)" --option build-users-group '' develop path:. -c cargo test --test relocation -- --ignored --nocapture
