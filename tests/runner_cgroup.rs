@@ -3,6 +3,8 @@ use distributed_nix::job_cgroup::Group;
 use std::{io::Write, path::Path, process::Stdio};
 use tokio::io::AsyncReadExt;
 
+static CGROUP_MOUNT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn detached_fixture() -> Result<()> {
     let Some(socket) = std::env::var_os("DISTRIBUTED_NIX_CGROUP_FIXTURE") else {
@@ -31,6 +33,7 @@ fn detached_fixture() -> Result<()> {
 #[tokio::test]
 #[ignore = "requires writable cgroup v2 and root"]
 async fn detached_descendant_is_dead_before_group_is_reusable() -> Result<()> {
+    let _mount = CGROUP_MOUNT.lock().unwrap();
     let temp = tempfile::tempdir()?;
     let socket = temp.path().join("ready");
     let listener = tokio::net::UnixListener::bind(&socket)?;
@@ -69,6 +72,7 @@ async fn detached_descendant_is_dead_before_group_is_reusable() -> Result<()> {
 #[tokio::test]
 #[ignore = "requires writable cgroup v2 and root"]
 async fn cleaning_one_job_preserves_concurrent_job_processes() -> Result<()> {
+    let _mount = CGROUP_MOUNT.lock().unwrap();
     let temp = tempfile::tempdir()?;
     let parent = distributed_nix::job_cgroup::parent(&temp.path().join("cgroups"))?;
     let mut jobs = Vec::new();
