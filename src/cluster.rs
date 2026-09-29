@@ -180,25 +180,7 @@ impl Cluster {
     }
     pub fn bootstrap(&self, node: &crate::node::Node) -> Result<Value> {
         let _publication = self.lease()?;
-        let known: std::collections::BTreeSet<String> = {
-            let _admit = Lock::acquire(&node.base.join("admit.lock"), false)?;
-            crate::admissions::Admissions::open(&node.base.join("admissions"))?
-                .ids()?
-                .into_iter()
-                .collect()
-        };
-        let mut count = 0;
-        for file in crate::node::journals(&node.lower.join(".distributed-nix-publications"))? {
-            let id = file
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .context("publication name")?;
-            if !known.contains(id) {
-                node.admit(&file, false)?;
-                count += 1;
-            }
-        }
-        Ok(json!({"admitted_batches":count}))
+        bootstrap_metadata(node)
     }
     pub fn publish_to(&self, node: usize, paths: &[String], targets: &[usize]) -> Result<Value> {
         let _lease = self.lease()?;
@@ -311,5 +293,116 @@ impl Cluster {
             &result,
         )?;
         Ok(result)
+    }
+}
+
+fn bootstrap_metadata(node: &crate::node::Node) -> Result<Value> {
+    let known: std::collections::BTreeSet<String> = {
+        let _admit = Lock::acquire(&node.base.join("admit.lock"), false)?;
+        crate::admissions::Admissions::open(&node.base.join("admissions"))?
+            .ids()?
+            .into_iter()
+            .collect()
+    };
+    let mut count = 0;
+    let mut deferred = Vec::new();
+    for file in crate::node::journals(&node.lower.join(".distributed-nix-publications"))? {
+        let id = file
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .context("publication name")?;
+        if !known.contains(id) {
+            let manifest = Manifest::read(&file)?;
+            let conflicts: Vec<String> = serde_json::from_value(
+                crate::native::realisation_conflicts(&node.root, &manifest)?,
+            )?;
+            if !conflicts.is_empty() {
+                deferred.push(json!({"batch": id, "conflicts": conflicts}));
+                continue;
+            }
+            node.admit(&file, false)?;
+            count += 1;
+        }
+    }
+    Ok(json!({"admitted_batches":count, "deferred_batches":deferred}))
+}
+
+#[cfg(test)]
+mod bootstrap_tests {
+    use super::*;
+    use crate::{admissions::Admissions, native, node::Node};
+    use std::{fs, process::Command};
+
+    #[test]
+    fn conflicting_publication_does_not_block_unrelated_cache_recovery() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let node = Node {
+            base: temp.path().join("state"),
+            root: temp.path().join("worker"),
+            origin: temp.path().join("origin"),
+            lower: temp.path().join("origin"),
+        };
+        fs::create_dir_all(&node.base)?;
+        fs::create_dir_all(node.root.join("nix/store"))?;
+        let mut paths = Vec::new();
+        for name in ["local", "published", "unrelated"] {
+            let input = temp.path().join(name);
+            fs::write(&input, name)?;
+            let added = output(
+                Command::new("nix-store")
+                    .args(["--option", "build-users-group", "", "--store"])
+                    .arg(&node.origin)
+                    .arg("--add")
+                    .arg(input),
+            )?;
+            paths.push(String::from_utf8(added.stdout)?.trim().to_owned());
+        }
+        native::copy(&node.origin, node.root.to_str().unwrap(), &paths[..1])?;
+        let id = format!("sha256:{}!out", "1".repeat(64));
+        let mut local = native::dump(&node.root, &paths[..1])?;
+        local.realisations.insert(
+            id.clone(),
+            json!({
+                "id":id, "outPath":paths[0].trim_start_matches("/nix/store/"),
+                "signatures":[], "dependentRealisations":{}
+            }),
+        );
+        native::register(&node.root, &local)?;
+        let mut conflict = native::dump(&node.origin, &paths[1..2])?;
+        conflict.realisations.insert(
+            id.clone(),
+            json!({
+                "id":id, "outPath":paths[1].trim_start_matches("/nix/store/"),
+                "signatures":[], "dependentRealisations":{}
+            }),
+        );
+        let unrelated = native::dump(&node.origin, &paths[2..])?;
+        let publications = node.lower.join(".distributed-nix-publications");
+        for manifest in [&conflict, &unrelated] {
+            durable(
+                &publications.join(format!("{}.json", manifest.id()?)),
+                manifest,
+            )?;
+        }
+        let result = bootstrap_metadata(&node)?;
+        ensure!(result["admitted_batches"] == 1);
+        ensure!(
+            result["deferred_batches"]
+                == json!([
+                    {"batch":conflict.id()?, "conflicts":[id.clone()]}
+                ])
+        );
+        ensure!(native::dump(&node.root, &paths[2..])?.paths == unrelated.paths);
+        let kept = native::dump_realisations(&node.root, &[local.realisations[&id].clone()])?;
+        ensure!(kept["manifest"]["realisations"] == serde_json::to_value(&local.realisations)?);
+        ensure!(
+            Admissions::open(&node.base.join("admissions"))?
+                .get(&conflict.id()?)?
+                .is_none()
+        );
+        ensure!(bootstrap_metadata(&node)?["admitted_batches"] == 0);
+        fs::write(publications.join("invalid.json"), "invalid")?;
+        ensure!(bootstrap_metadata(&node).is_err());
+        Ok(())
     }
 }
