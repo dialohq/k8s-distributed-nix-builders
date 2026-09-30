@@ -102,6 +102,13 @@ impl Service {
             Operation::Info => {
                 json!({"index":self.config.index,"ready":true,"members":self.config.nodes})
             }
+            Operation::Release => {
+                crate::gc::remove_file(&batch_file()?)?;
+                Value::Null
+            }
+            Operation::CaReject => self
+                .node
+                .ca_reject(&serde_json::from_slice(&request.manifest)?)?,
             Operation::Receive => {
                 let manifest = Manifest::parse(serde_json::from_slice(&request.manifest)?)?;
                 let id = manifest.id()?;

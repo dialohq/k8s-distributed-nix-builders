@@ -4,6 +4,36 @@ Run `distributed-nix gc` inside the store pod. `--dry-run` reports a plan;
 `--if-needed` collects under disk pressure or resumes an interrupted epoch.
 The store container runs this check periodically. Builds continue during GC.
 
+The chart defaults to collection below 25% free space, aiming for 30% free.
+`gc.maxStoreBytes` and `gc.targetStoreBytes` optionally bound the origin's
+filesystem usage (both zero disables the absolute budget). For a 100 GiB
+trigger and 80 GiB target, set them to `107374182400` and `85899345920`.
+Collection starts at either the size limit or free-space threshold. It selects
+oldest **registered**, unrooted closures first. Dependencies inherit the newest
+registration time of their referrers, so an old shared library does not drag a
+recent build into eviction ahead of older garbage. This is not access-time LRU.
+Roots always win over a budget.
+NAR sizes estimate space reclaimed; sparse files, hard links, metadata and
+concurrent builds can make actual usage differ. Subsequent checks measure the
+filesystem again. A manual `gc` still collects all eligible garbage.
+
+Graph edges honor Nix's `keep-outputs` and `keep-derivations` independently,
+including content-addressed outputs with no static derivation output entry.
+
+Conflicting CA publications and their dependents are terminal: compare-and-delete
+releases their publication roots without altering local realisations or active
+job roots. The latest rejection report remains in `last-rejected-publication.json`.
+Other publication attempts expire after `gc.publicationMaxAgeSeconds` (default
+24 hours); builds may continue using their independent job/native roots. Expiry
+abandons cross-builder sharing of that attempt, so a later job may rebuild it.
+
+Maintenance runs under the exclusive publication lease on every non-dry check,
+even below the size threshold. It expires publication roots, removes abandoned
+incoming manifests and keeps four completed GC histories and 32 publication reports. Successful transfers
+release incoming manifests immediately. Unfinished epochs and admission recovery
+records never expire. Upgrade all participants before using the new policy;
+mixed versions fail closed until the rollout completes.
+
 Each native daemon connection pins paths before reading their metadata or
 registering them. Connections share Nix roots keyed by `DISTRIBUTED_NIX_POD_UID`.
 Ordinary clients use the pod UID: their pins survive until pod replacement and
@@ -24,6 +54,12 @@ reference graphs, and installs durable retirement markers for candidate paths
 on every participant. It reads roots again: paths acquired between the first
 mark and the barrier remain live. Requests for retiring paths wait until
 collection finishes, then recheck native metadata; unrelated requests continue.
+
+Before a new collection, the exclusive publication lease also allows the
+coordinator to discard reservations left by failed or interrupted publications.
+No live publication or transfer holds that lease at this point. Retries reserve
+again; worker outboxes and committed publication records remain intact. Dry runs
+leave reservations untouched and can therefore report fewer reclaimable paths.
 
 Workers checkpoint admission metadata, retaining new admissions and old live
 paths, remove dead mounts, and ask native Nix to delete the selected paths with

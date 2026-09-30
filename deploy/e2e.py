@@ -168,6 +168,15 @@ finally:
 eventually(ready, timeout=300)
 passed('missing_peer_fails_closed')
 
+# Below the budget, housekeeping still releases abandoned transfer metadata.
+execute(store, 'bash', '-ec', 'mkdir -p /var/lib/distributed-nix/incoming; echo \'{}\' > /var/lib/distributed-nix/incoming/e2e-abandoned.json')
+maintenance = json.loads(execute(store, 'env',
+    'DISTRIBUTED_NIX_GC_MIN_FREE_PERCENT=1', 'DISTRIBUTED_NIX_GC_TARGET_FREE_PERCENT=2',
+    'distributed-nix', 'gc', '--if-needed').stdout)
+assert 'skipped' in maintenance, maintenance
+assert execute(store, 'test', '-e', '/var/lib/distributed-nix/incoming/e2e-abandoned.json', check=False).returncode != 0
+passed('maintenance_without_disk_pressure')
+
 failed = execute(store, 'env', 'DISTRIBUTED_NIX_FAILPOINT=online-after-barriers',
                  'distributed-nix', 'gc', check=False)
 assert failed.returncode == 137, (failed.returncode, failed.stderr)
@@ -195,7 +204,10 @@ passed('build_during_gc')
 # All pods which touched the first output are retired, then GC can reclaim it.
 for pod in builders:
     replace(pod)
-execute(store, 'distributed-nix', 'gc')
+budgeted = json.loads(execute(store, 'env',
+    'DISTRIBUTED_NIX_GC_MAX_STORE_BYTES=2', 'DISTRIBUTED_NIX_GC_TARGET_STORE_BYTES=1',
+    'distributed-nix', 'gc', '--if-needed').stdout)
+assert budgeted['bytes_freed'] > 0 and budgeted['pressure_remaining'], budgeted
 assert execute(store, 'test', '-e', '/srv/distributed-nix/origin' + output, check=False).returncode != 0
 passed('unrooted_output_collected')
 report['elapsed_seconds'] = round(time.monotonic() - started, 2)

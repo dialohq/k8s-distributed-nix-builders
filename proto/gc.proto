@@ -3,6 +3,7 @@ package distributed_nix.v1;
 
 // Administrative collection only; this endpoint cannot execute commands.
 service OnlineGC {
+  rpc Maintain(GCRequest) returns (GCReply);
   rpc Preflight(GCRequest) returns (GCReply);
   rpc Snapshot(GCRequest) returns (GCReply);
   rpc Prepare(GCRequest) returns (GCReply);
@@ -26,7 +27,7 @@ message StoreRequest {
     RECEIVE = 0; DUMP = 1; DUMP_ORIGIN = 2; ADMIT = 3;
     RESERVE = 4; COMMIT = 5; CANONICAL = 6; OUTBOX = 7;
     ACKNOWLEDGE = 8; CA_OUTBOX = 9; CA_ACKNOWLEDGE = 10;
-    CONFLICTS = 11; PIN = 12; PUBLICATION = 13; INFO = 14;
+    CONFLICTS = 11; PIN = 12; PUBLICATION = 13; INFO = 14; RELEASE = 15; CA_REJECT = 16;
   }
   Operation operation = 1;
   repeated string paths = 2;

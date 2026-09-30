@@ -1,6 +1,6 @@
 //! Authenticated, typed GC coordination on the private cluster network.
 use crate::{
-    gc::{Plan, Snapshot, plan, remove_file},
+    gc::{Plan, Policy, Snapshot, oldest_first, plan, remove_file},
     node::Node,
     online_rpc::wire::{
         GcReply, GcRequest,
@@ -110,6 +110,7 @@ impl Service {
             let _operation =
                 Lock::acquire(&service.node.base.join("online-operation.lock"), false)?;
             match op {
+                "maintain" => service.node.maintain(&request.epoch),
                 "preflight" => {
                     let (required, all) = service.config.pods()?;
                     let mut report =
@@ -170,6 +171,9 @@ impl Service {
 }
 #[tonic::async_trait]
 impl OnlineGc for Service {
+    async fn maintain(&self, r: Request<GcRequest>) -> Result<Response<GcReply>, Status> {
+        self.operation(r, "maintain").await
+    }
     async fn preflight(&self, r: Request<GcRequest>) -> Result<Response<GcReply>, Status> {
         self.operation(r, "preflight").await
     }
@@ -237,6 +241,7 @@ impl Client {
             .metadata_mut()
             .insert("authorization", self.token.clone());
         let reply = match op {
+            "maintain" => self.client.maintain(request).await,
             "preflight" => self.client.preflight(request).await,
             "snapshot" => self.client.snapshot(request).await,
             "prepare" => self.client.prepare(request).await,
@@ -277,11 +282,25 @@ fn reserve_epoch(node: &Node, id: &str) -> Result<()> {
     crate::util::syncdir(epoch.parent().unwrap())
 }
 
+// The coordinator holds the exclusive publication lease; no copy can still
+// own these reservations. Retries reserve again, and worker outboxes stay rooted.
+fn discard_abandoned_publications(node: &Node) -> Result<()> {
+    ensure!(
+        !node.base.join("online-master.json").exists()
+            && !node.base.join("online-gc.json").exists(),
+        "finish the active collection before discarding reservations"
+    );
+    for file in crate::node::journals(&node.base.join("pending-publications"))? {
+        remove_file(&file)?;
+    }
+    Ok(())
+}
+
 pub async fn collect(
     node: &Node,
     config: &Config,
     dry: bool,
-    threshold: Option<u8>,
+    policy: Option<Policy>,
 ) -> Result<Value> {
     config.validate()?;
     ensure!(config.index == 0, "run coordinator on origin node");
@@ -313,9 +332,10 @@ pub async fn collect(
             token: token.clone(),
         });
     }
+    let mut goals = None;
     // Finishing is idempotent even if a peer already removed its marker.
     if state["phase"] != "finish" {
-        let mut pressure = false;
+        let mut reports = Vec::new();
         for (index, client) in clients.iter_mut().enumerate() {
             let report = client.call("preflight", &id, false, None).await?;
             ensure!(
@@ -326,23 +346,32 @@ pub async fn collect(
                 report["index"] == index,
                 "GC endpoint has the wrong node identity"
             );
-            if let Some(percent) = threshold {
-                ensure!(
-                    (1..=100).contains(&percent),
-                    "invalid disk pressure threshold"
-                );
-                pressure |= u128::from(report["available"].as_u64().context("available blocks")?)
-                    * 100
-                    < u128::from(report["blocks"].as_u64().context("total blocks")?)
-                        * u128::from(percent);
+            reports.push(report);
+        }
+        if !dry && !file.exists() {
+            for (index, client) in clients.iter_mut().enumerate() {
+                client.call("maintain", &id, false, None).await?;
+                reports[index] = client.call("preflight", &id, false, None).await?;
             }
         }
-        if threshold.is_some() && !pressure && !file.exists() {
-            return Ok(json!({"skipped":"no shared-store disk pressure"}));
+        if let Some(policy) = &policy {
+            let (pressure, wanted) = policy.goals(&reports)?;
+            if !pressure && !file.exists() {
+                return Ok(json!({"skipped":"below cache budget and disk pressure thresholds"}));
+            }
+            goals = Some(wanted);
         }
     }
     if state.get("candidates").is_none() {
-        let candidate = plan(&id, &snapshots(&mut clients, &id).await?)?;
+        if !dry && !file.exists() {
+            discard_abandoned_publications(node)?;
+        }
+        let snapshots = snapshots(&mut clients, &id).await?;
+        let mut candidate = plan(&id, &snapshots)?;
+        if let Some(wanted) = goals {
+            candidate = oldest_first(candidate, &snapshots, &wanted)?;
+            state["requested_bytes"] = json!(wanted);
+        }
         if dry {
             return Ok(json!({"dry_run":true,"plan":candidate}));
         }
@@ -397,6 +426,14 @@ pub async fn collect(
         .map(|r| r["result"]["bytes_freed"].as_u64().unwrap_or(0))
         .sum();
     state["bytes_freed"] = json!(bytes);
+    if let Some(policy) = policy {
+        let mut reports = Vec::new();
+        for client in &mut clients {
+            reports.push(client.call("preflight", &id, false, None).await?);
+        }
+        state["pressure_remaining"] = json!(policy.goals(&reports)?.0);
+        state["usage_after"] = json!(reports);
+    }
     durable(&node.gc_epoch(&id)?.join("online-complete.json"), &state)?;
     remove_file(&file)?;
     Ok(state)
@@ -409,6 +446,34 @@ pub mod wire {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn abandoned_reservations_do_not_retire_worker_or_committed_state() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let node = Node {
+            base: directory.path().join("state"),
+            origin: directory.path().join("origin"),
+            ..Node::default()
+        };
+        let pending = node.base.join("pending-publications/batch.json");
+        let committed = node.origin.join(".distributed-nix-publications/batch.json");
+        let outbox = node.base.join("outbox/path.json");
+        for file in [&pending, &committed, &outbox] {
+            durable(file, &json!({"retained":true}))?;
+        }
+        let active = node.base.join("online-gc.json");
+        durable(&active, &json!({"id":"active"}))?;
+        ensure!(discard_abandoned_publications(&node).is_err());
+        ensure!(pending.exists());
+        remove_file(&active)?;
+        let _publication = Lock::acquire(&node.base.join("publication.lock"), false)?;
+        discard_abandoned_publications(&node)?;
+        discard_abandoned_publications(&node)?;
+        ensure!(!pending.exists());
+        ensure!(read_json(&committed)? == json!({"retained":true}));
+        ensure!(read_json(&outbox)? == json!({"retained":true}));
+        Ok(())
+    }
+
     #[test]
     fn epoch_reservation_never_reuses_previous_acknowledgements() -> Result<()> {
         let directory = tempfile::tempdir()?;

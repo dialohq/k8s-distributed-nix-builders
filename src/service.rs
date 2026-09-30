@@ -169,10 +169,10 @@ impl Node {
         for id in ids {
             let key = ca_key(id);
             for file in [
-                self.base.join("ca-outbox").join(format!("{key}.json")),
                 self.root
                     .join("nix/var/nix/gcroots/distributed-nix-ca-outbox")
                     .join(&key),
+                self.base.join("ca-outbox").join(format!("{key}.json")),
             ] {
                 if file.symlink_metadata().is_ok() {
                     fs::remove_file(&file)?;
@@ -181,6 +181,33 @@ impl Node {
             }
         }
         Ok(json!({"acknowledged":ids.len()}))
+    }
+    pub fn ca_reject(&self, records: &std::collections::BTreeMap<String, Value>) -> Result<Value> {
+        let _queue = Lock::acquire(&self.base.join("outbox.lock"), false)?;
+        let mut rejected = Vec::new();
+        for (id, observed) in records {
+            ensure!(observed["id"] == *id, "realisation ID mismatch");
+            let file = self
+                .base
+                .join("ca-outbox")
+                .join(format!("{}.json", ca_key(id)));
+            if file.exists() && read_json(&file)? == *observed {
+                rejected.push(id.clone());
+            }
+        }
+        let report = json!({"reason":"conflicting realisations", "ids":rejected});
+        durable(&self.base.join("last-rejected-publication.json"), &report)?;
+        for id in &rejected {
+            let key = ca_key(id);
+            crate::gc::remove_file(
+                &self
+                    .root
+                    .join("nix/var/nix/gcroots/distributed-nix-ca-outbox")
+                    .join(&key),
+            )?;
+            crate::gc::remove_file(&self.base.join("ca-outbox").join(format!("{key}.json")))?;
+        }
+        Ok(report)
     }
     pub fn ca_backfill(&self) -> Result<Value> {
         let records = crate::native::scan_realisations(&self.root)?;
@@ -283,10 +310,10 @@ impl Node {
             ensure!(valid_path(path), "invalid acknowledged path");
             let name = path.rsplit('/').next().unwrap();
             for file in [
-                self.base.join("outbox").join(format!("{name}.json")),
                 self.root
                     .join("nix/var/nix/gcroots/distributed-nix-outbox")
                     .join(name),
+                self.base.join("outbox").join(format!("{name}.json")),
             ] {
                 if file.symlink_metadata().is_ok() {
                     fs::remove_file(&file)?;
@@ -322,6 +349,7 @@ fn publish_queued(
 
 impl Cluster {
     fn publish_ca_pending(&self, node: usize) -> Result<Vec<Value>> {
+        let _lease = self.lease()?;
         let ca = self.call_json(node, &["ca-outbox".into()])?;
         if ca.is_null() {
             return Ok(Vec::new());
@@ -330,8 +358,9 @@ impl Cluster {
         let ready = serde_json::from_value::<Vec<String>>(ca["ready"].clone())?;
         ensure!(!ready.is_empty(), "CA manifest has no ready records");
         let reports = self.parallel(|target| {
-            let file = self.receive(target, &manifest)?;
-            self.call_json(target, &["realisation-conflicts".into(), file])
+            self.with_manifest(target, &manifest, |id| {
+                self.call_json(target, &["realisation-conflicts".into(), id])
+            })
         })?;
         let mut conflicts = std::collections::BTreeSet::new();
         for report in &reports {
@@ -342,7 +371,19 @@ impl Cluster {
         let blocked = manifest.blocked_realisations(conflicts)?;
         let mut rows = Vec::new();
         if !blocked.is_empty() {
-            rows.push(json!({"node":node,"error":"conflicting realisations; queued with roots retained", "blocked":blocked, "conflicts":reports}));
+            let rejected: std::collections::BTreeMap<_, _> = manifest
+                .realisations
+                .iter()
+                .filter(|(id, _)| blocked.contains(*id))
+                .collect();
+            let result = self.request(
+                node,
+                crate::online_rpc::wire::store_request::Operation::CaReject,
+                &[],
+                "",
+                serde_json::to_vec(&rejected)?,
+            )?;
+            rows.push(json!({"node":node,"error":"conflicting realisations; publication abandoned", "rejected":result, "conflicts":reports}));
         }
         let ready: Vec<_> = ready
             .into_iter()
@@ -409,6 +450,37 @@ impl Cluster {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejected_ca_records_do_not_release_a_replaced_record_or_job_root() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let node = Node {
+            base: dir.path().join("state"),
+            root: dir.path().join("root"),
+            ..Node::default()
+        };
+        let id = format!("sha256:{}!out", "1".repeat(64));
+        let original = json!({"id":id,"outPath":"11111111111111111111111111111111-first"});
+        enqueue_realisation(&node.base, &node.root, &original)?;
+        let active = node.root.join("nix/var/nix/gcroots/job");
+        symlink("/nix/store/11111111111111111111111111111111-first", &active)?;
+        let records = std::collections::BTreeMap::from([(id.clone(), original.clone())]);
+        let mut replacement = original.clone();
+        replacement["outPath"] = json!("22222222222222222222222222222222-second");
+        enqueue_realisation(&node.base, &node.root, &replacement)?;
+        assert_eq!(node.ca_reject(&records)?["ids"], json!([]));
+        assert!(
+            node.base
+                .join("ca-outbox")
+                .join(format!("{}.json", ca_key(&id)))
+                .exists()
+        );
+        let records = std::collections::BTreeMap::from([(id.clone(), replacement)]);
+        assert_eq!(node.ca_reject(&records)?["ids"], json!([id]));
+        assert!(crate::node::journals(&node.base.join("ca-outbox"))?.is_empty());
+        assert!(active.symlink_metadata().is_ok());
+        Ok(())
+    }
 
     #[test]
     fn publication_acknowledges_queued_dependencies_only_after_success() -> Result<()> {

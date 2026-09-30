@@ -109,6 +109,21 @@ async fn native_stream_publication_is_authenticated_retryable_and_cannot_collect
             .join(format!("{id}.json"))
             .exists()
     );
+    client.operate(request(Operation::Release)).await?;
+    client.operate(request(Operation::Release)).await?;
+    ensure!(
+        !node
+            .base
+            .join("incoming")
+            .join(format!("{id}.json"))
+            .exists()
+    );
+    ensure!(
+        node.origin
+            .join(".distributed-nix-publications")
+            .join(format!("{id}.json"))
+            .exists()
+    );
     let gc_uri = destination.clone();
     let forbidden = tokio::task::spawn_blocking(move || {
         Command::new("nix-store")

@@ -64,12 +64,8 @@ fn execute() -> Result<()> {
                             && matches!(args[1].as_str(), "--dry-run" | "--if-needed")),
                     "usage: gc [--dry-run | --if-needed]"
                 );
-                let threshold = if args.get(1).is_some_and(|s| s == "--if-needed") {
-                    Some(
-                        std::env::var("DISTRIBUTED_NIX_GC_MIN_FREE_PERCENT")
-                            .unwrap_or_else(|_| "20".into())
-                            .parse()?,
-                    )
+                let policy = if args.get(1).is_some_and(|s| s == "--if-needed") {
+                    Some(distributed_nix::gc::Policy::from_env()?)
                 } else {
                     None
                 };
@@ -77,7 +73,7 @@ fn execute() -> Result<()> {
                     &Node::default(),
                     &config,
                     args.get(1).is_some_and(|s| s == "--dry-run"),
-                    threshold,
+                    policy,
                 )
                 .await?;
                 println!("{}", serde_json::to_string_pretty(&result)?);

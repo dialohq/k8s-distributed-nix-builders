@@ -283,7 +283,9 @@ impl Node {
             unsafe { libc::statvfs(path.as_ptr(), &mut usage) } == 0,
             "store filesystem usage"
         );
-        Ok(json!({"ready":true,"blocks":usage.f_blocks,"available":usage.f_bavail}))
+        Ok(
+            json!({"ready":true,"blocks":usage.f_blocks,"available":usage.f_bavail,"free":usage.f_bfree,"block_size":usage.f_frsize}),
+        )
     }
 
     pub fn online_snapshot(&self, origin: bool) -> Result<Snapshot> {
@@ -613,6 +615,7 @@ mod tests {
         let plan = plan();
         let mut snapshots = vec![
             Snapshot {
+                metadata: Default::default(),
                 live: BTreeSet::new(),
                 graph: std::collections::BTreeMap::from([
                     (LIVE.into(), BTreeSet::from([DEAD.into()])),
