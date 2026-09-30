@@ -25,6 +25,12 @@ on every participant. It reads roots again: paths acquired between the first
 mark and the barrier remain live. Requests for retiring paths wait until
 collection finishes, then recheck native metadata; unrelated requests continue.
 
+Before a new collection, the exclusive publication lease also allows the
+coordinator to discard reservations left by failed or interrupted publications.
+No live publication or transfer holds that lease at this point. Retries reserve
+again; worker outboxes and committed publication records remain intact. Dry runs
+leave reservations untouched and can therefore report fewer reclaimable paths.
+
 Workers checkpoint admission metadata, retaining new admissions and old live
 paths, remove dead mounts, and ask native Nix to delete the selected paths with
 liveness enforcement enabled. Only after every configured participant has
