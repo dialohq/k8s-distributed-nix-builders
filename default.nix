@@ -2,7 +2,7 @@
 assert pkgs.nixVersions.latest.version == "2.33.6";
   pkgs.rustPlatform.buildRustPackage {
     pname = "distributed-nix";
-    version = "0.4.8";
+    version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
     src = pkgs.lib.fileset.toSource {
       root = ./.;
       fileset = pkgs.lib.fileset.unions [./src ./native ./proto ./tests ./Cargo.toml ./Cargo.lock ./build.rs];
