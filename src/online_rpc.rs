@@ -426,6 +426,14 @@ pub async fn collect(
         .map(|r| r["result"]["bytes_freed"].as_u64().unwrap_or(0))
         .sum();
     state["bytes_freed"] = json!(bytes);
+    if let Some(policy) = policy {
+        let mut reports = Vec::new();
+        for client in &mut clients {
+            reports.push(client.call("preflight", &id, false, None).await?);
+        }
+        state["pressure_remaining"] = json!(policy.goals(&reports)?.0);
+        state["usage_after"] = json!(reports);
+    }
     durable(&node.gc_epoch(&id)?.join("online-complete.json"), &state)?;
     remove_file(&file)?;
     Ok(state)

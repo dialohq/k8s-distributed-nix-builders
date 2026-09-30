@@ -284,7 +284,7 @@ impl Node {
             "store filesystem usage"
         );
         Ok(
-            json!({"ready":true,"blocks":usage.f_blocks,"available":usage.f_bavail,"block_size":usage.f_frsize}),
+            json!({"ready":true,"blocks":usage.f_blocks,"available":usage.f_bavail,"free":usage.f_bfree,"block_size":usage.f_frsize}),
         )
     }
 

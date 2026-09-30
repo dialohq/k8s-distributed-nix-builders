@@ -477,7 +477,12 @@ impl Policy {
                 total > 0 && block_size > 0 && available <= total,
                 "invalid filesystem usage"
             );
-            let used = (total - available) * block_size;
+            let free = u128::from(report["free"].as_u64().context("free blocks")?);
+            ensure!(
+                available <= free && free <= total,
+                "invalid free block count"
+            );
+            let used = (total - free) * block_size;
             pressure |= available * 100 < total * u128::from(self.min_free_percent);
             let mut goal = (total * u128::from(self.target_free_percent) / 100)
                 .saturating_sub(available)
@@ -507,7 +512,8 @@ mod policy_tests {
             max_store_bytes: 100,
             target_store_bytes: 80,
         };
-        let usage = |available| json!({"blocks":700,"available":available,"block_size":1});
+        let usage =
+            |available| json!({"blocks":700,"available":available,"free":available,"block_size":1});
         assert_eq!(
             policy.goals(&[usage(590), usage(600)])?,
             (true, vec![0, 0, 30])
@@ -516,6 +522,11 @@ mod policy_tests {
         assert_eq!(
             policy.goals(&[usage(610), usage(170)])?,
             (true, vec![0, 40, 10])
+        );
+        let reserved = json!({"blocks":700,"available":570,"free":620,"block_size":1});
+        assert!(
+            !policy.goals(&[reserved])?.0,
+            "reserved blocks are not used cache space"
         );
         policy.target_store_bytes = 100;
         assert!(policy.validate().is_err());
