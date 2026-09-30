@@ -27,6 +27,9 @@ jobs:
       - uses: nixbuild/nix-quick-install-action@2c9db80fb984ceb1bcaa77cdda3fdf8cfba92035
       - name: Build image and tools
         run: |
+          release_version=$(sed -n 's/^version: //p' deploy/chart/Chart.yaml)
+          test "$(nix eval --raw .#packages.x86_64-linux.image.imageTag)" = "$release_version"
+          test "$(nix eval --raw .#packages.x86_64-linux.arcImage.imageTag)" = "$release_version-arc"
           nix build .#image --out-link image -L
           nix build .#arcImage --out-link arc-image -L
           nix build .#deploymentTools --out-link deployment-tools
