@@ -123,9 +123,43 @@ int reply(distributed_nix_buffer *out, std::string_view text, int status) noexce
 }
 
 class TransferStore : public nix::LocalStore {
+    bool writable;
+    void requireWritable() const
+    {
+        if (!writable) throw nix::Error("worker transfer endpoint is export-only");
+    }
 public:
-    explicit TransferStore(nix::ref<const nix::LocalStoreConfig> config)
-        : nix::Store(*config), nix::LocalFSStore(*config), nix::LocalStore(config) {}
+    TransferStore(nix::ref<const nix::LocalStoreConfig> config, bool writable)
+        : nix::Store(*config), nix::LocalFSStore(*config), nix::LocalStore(config), writable(writable) {}
+
+    void registerDrvOutput(const nix::Realisation & info) override
+    {
+        requireWritable();
+        nix::LocalStore::registerDrvOutput(info);
+    }
+
+    void registerDrvOutput(const nix::Realisation & info, nix::CheckSigsFlag checkSigs) override
+    {
+        requireWritable();
+        nix::LocalStore::registerDrvOutput(info, checkSigs);
+    }
+
+    void addSignatures(const nix::StorePath & path, const nix::StringSet & signatures) override
+    {
+        requireWritable();
+        nix::LocalStore::addSignatures(path, signatures);
+    }
+
+    void addBuildLog(const nix::StorePath &, std::string_view) override
+    {
+        throw nix::Error("transfer endpoint does not publish build logs");
+    }
+
+    void ensurePath(const nix::StorePath & path) override
+    {
+        if (!isValidPath(path)) requireWritable();
+        nix::LocalStore::ensurePath(path);
+    }
 
     void collectGarbage(const nix::GCOptions &, nix::GCResults &) override
     {
@@ -170,6 +204,7 @@ public:
     void addToStore(const nix::ValidPathInfo & info, nix::Source & source,
         nix::RepairFlag repair, nix::CheckSigsFlag checkSigs) override
     {
+        requireWritable();
         if (repair != nix::NoRepair) throw nix::Error("cannot replace a live shared path");
         nix::settings.fsyncStorePaths = true;
         nix::LocalStore::addToStore(info, source, repair, checkSigs);
@@ -440,7 +475,7 @@ extern "C" int distributed_nix_serve_v1(int trusted, distributed_nix_buffer *res
     }
 }
 
-extern "C" int distributed_nix_serve_transfer_v1(const char *uri, int trusted, distributed_nix_buffer *result) noexcept
+extern "C" int distributed_nix_serve_transfer_v2(const char *uri, int writable, distributed_nix_buffer *result) noexcept
 {
     if (!result) return 2;
     *result = {nullptr, 0};
@@ -449,9 +484,9 @@ extern "C" int distributed_nix_serve_transfer_v1(const char *uri, int trusted, d
         std::call_once(initialized, [] { nix::initNix(); });
         auto local = nix::openStore(uri).dynamic_pointer_cast<nix::LocalStore>();
         if (!local) throw nix::Error("collection requires a local store");
-        auto store = nix::make_ref<TransferStore>(local->config);
+        auto store = nix::make_ref<TransferStore>(local->config, writable != 0);
         nix::daemon::processConnection(store, nix::FdSource(0), nix::FdSink(1),
-            trusted ? nix::Trusted : nix::NotTrusted, nix::daemon::NotRecursive);
+            nix::Trusted, nix::daemon::NotRecursive);
         return 0;
     } catch (const std::exception & e) {
         return reply(result, e.what(), 1);
