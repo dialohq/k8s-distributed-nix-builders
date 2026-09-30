@@ -27,7 +27,7 @@ abandons cross-builder sharing of that attempt, so a later job may rebuild it.
 
 Maintenance runs under the exclusive publication lease on every non-dry check,
 even below the size threshold. It expires publication roots, removes abandoned
-incoming manifests and keeps four completed GC histories. Successful transfers
+incoming manifests and keeps four completed GC histories and 32 publication reports. Successful transfers
 release incoming manifests immediately. Unfinished epochs and admission recovery
 records never expire. Upgrade all participants before using the new policy;
 mixed versions fail closed until the rollout completes.

@@ -598,8 +598,10 @@ impl Node {
                         && !self
                             .base
                             .join(queue)
-                            .join(entry.file_name())
-                            .with_extension("json")
+                            .join(format!(
+                                "{}.json",
+                                entry.file_name().to_str().context("queue filename")?
+                            ))
                             .exists()
                     {
                         remove_file(&entry.path())?;
@@ -634,8 +636,25 @@ impl Node {
             fs::remove_dir_all(path)?;
         }
         syncdir(&epochs)?;
+        let mut reports = Vec::new();
+        for file in crate::node::journals(&self.base.join("cluster/results/distributed-nix"))? {
+            let name = file.file_name().unwrap().to_string_lossy();
+            if name
+                .strip_prefix("publication-")
+                .or_else(|| name.strip_prefix("reconcile-"))
+                .and_then(|id| id.strip_suffix(".json"))
+                .is_some_and(|id| id.len() == 64 && id.bytes().all(|c| c.is_ascii_hexdigit()))
+            {
+                reports.push((fs::metadata(&file)?.modified()?, file));
+            }
+        }
+        reports.sort();
+        let report_count = reports.len().saturating_sub(32);
+        for (_, file) in reports.into_iter().take(report_count) {
+            remove_file(&file)?;
+        }
         Ok(
-            serde_json::json!({"expired_publications":expired,"incoming_removed":incoming.len(),"histories_removed":histories}),
+            serde_json::json!({"expired_publications":expired,"incoming_removed":incoming.len(),"histories_removed":histories,"reports_removed":report_count}),
         )
     }
 }
@@ -664,7 +683,7 @@ mod maintenance_tests {
                 .root
                 .join(format!("nix/var/nix/gcroots/distributed-nix-{queue}"));
             fs::create_dir_all(&roots)?;
-            for (name, age) in [("old", 90000), ("new", 1)] {
+            for (name, age) in [("old", 90000), ("new.drv", 1)] {
                 let file = node.base.join(queue).join(format!("{name}.json"));
                 durable(&file, &json!({"path":path}))?;
                 fs::File::open(file)?.set_modified(now - Duration::from_secs(age))?;
@@ -681,6 +700,14 @@ mod maintenance_tests {
                 durable(&epoch.join("online-finished.json"), &json!({}))?;
             }
         }
+        for i in 0..40 {
+            durable(
+                &node.base.join(format!(
+                    "cluster/results/distributed-nix/publication-{i:064x}.json"
+                )),
+                &json!({}),
+            )?;
+        }
         let current = format!("{:032x}", 9);
         durable(&node.base.join("online-master.json"), &json!({}))?;
         assert!(
@@ -691,11 +718,14 @@ mod maintenance_tests {
         let report = node.maintain_at(&current, now, Duration::from_secs(86400))?;
         assert_eq!(
             report,
-            json!({"expired_publications":2,"incoming_removed":1,"histories_removed":3})
+            json!({"expired_publications":2,"incoming_removed":1,"histories_removed":3,"reports_removed":8})
         );
         for queue in ["outbox", "ca-outbox"] {
             assert!(!node.base.join(queue).join("old.json").exists());
-            assert!(node.base.join(queue).join("new.json").exists());
+            assert!(node.base.join(queue).join("new.drv.json").exists());
+            assert!(present(&node.root.join(format!(
+                "nix/var/nix/gcroots/distributed-nix-{queue}/new.drv"
+            ))));
             assert!(!present(&node.root.join(format!(
                 "nix/var/nix/gcroots/distributed-nix-{queue}/old"
             ))));
