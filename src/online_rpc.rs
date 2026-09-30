@@ -277,6 +277,20 @@ fn reserve_epoch(node: &Node, id: &str) -> Result<()> {
     crate::util::syncdir(epoch.parent().unwrap())
 }
 
+// The coordinator holds the exclusive publication lease; no copy can still
+// own these reservations. Retries reserve again, and worker outboxes stay rooted.
+fn discard_abandoned_publications(node: &Node) -> Result<()> {
+    ensure!(
+        !node.base.join("online-master.json").exists()
+            && !node.base.join("online-gc.json").exists(),
+        "finish the active collection before discarding reservations"
+    );
+    for file in crate::node::journals(&node.base.join("pending-publications"))? {
+        remove_file(&file)?;
+    }
+    Ok(())
+}
+
 pub async fn collect(
     node: &Node,
     config: &Config,
@@ -342,6 +356,9 @@ pub async fn collect(
         }
     }
     if state.get("candidates").is_none() {
+        if !dry && !file.exists() {
+            discard_abandoned_publications(node)?;
+        }
         let candidate = plan(&id, &snapshots(&mut clients, &id).await?)?;
         if dry {
             return Ok(json!({"dry_run":true,"plan":candidate}));
@@ -409,6 +426,34 @@ pub mod wire {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn abandoned_reservations_do_not_retire_worker_or_committed_state() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let node = Node {
+            base: directory.path().join("state"),
+            origin: directory.path().join("origin"),
+            ..Node::default()
+        };
+        let pending = node.base.join("pending-publications/batch.json");
+        let committed = node.origin.join(".distributed-nix-publications/batch.json");
+        let outbox = node.base.join("outbox/path.json");
+        for file in [&pending, &committed, &outbox] {
+            durable(file, &json!({"retained":true}))?;
+        }
+        let active = node.base.join("online-gc.json");
+        durable(&active, &json!({"id":"active"}))?;
+        ensure!(discard_abandoned_publications(&node).is_err());
+        ensure!(pending.exists());
+        remove_file(&active)?;
+        let _publication = Lock::acquire(&node.base.join("publication.lock"), false)?;
+        discard_abandoned_publications(&node)?;
+        discard_abandoned_publications(&node)?;
+        ensure!(!pending.exists());
+        ensure!(read_json(&committed)? == json!({"retained":true}));
+        ensure!(read_json(&outbox)? == json!({"retained":true}));
+        Ok(())
+    }
+
     #[test]
     fn epoch_reservation_never_reuses_previous_acknowledgements() -> Result<()> {
         let directory = tempfile::tempdir()?;

@@ -104,12 +104,15 @@ async fn authenticated_rpc_rejects_unknown_pods_and_conflicting_epochs() -> Resu
             == Code::FailedPrecondition
     );
     // Failed endpoint connection does not clear durable retirement fences.
+    let reservation = base.join("pending-publications/batch.json");
+    durable(&reservation, &json!({"retained":true}))?;
     ensure!(
         distributed_nix::online_rpc::collect(&node, &config, false, None)
             .await
             .is_err()
     );
     ensure!(base.join("online-gc.json").exists() && base.join("retiring").exists());
+    ensure!(reservation.exists());
     stop.send(()).unwrap();
     server.await??;
     Ok(())
