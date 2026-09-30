@@ -9,8 +9,10 @@ The chart defaults to collection below 25% free space, aiming for 30% free.
 filesystem usage (both zero disables the absolute budget). For a 100 GiB
 trigger and 80 GiB target, set them to `107374182400` and `85899345920`.
 Collection starts at either the size limit or free-space threshold. It selects
-oldest **registered**, unrooted paths first, including unrooted referrers needed
-for safe deletion. This is not access-time LRU. Roots always win over a budget.
+oldest **registered**, unrooted closures first. Dependencies inherit the newest
+registration time of their referrers, so an old shared library does not drag a
+recent build into eviction ahead of older garbage. This is not access-time LRU.
+Roots always win over a budget.
 NAR sizes estimate space reclaimed; sparse files, hard links, metadata and
 concurrent builds can make actual usage differ. Subsequent checks measure the
 filesystem again. A manual `gc` still collects all eligible garbage.

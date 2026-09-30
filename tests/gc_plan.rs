@@ -92,3 +92,26 @@ fn eviction_includes_referrers_cycles_and_fails_without_metadata() {
     s.metadata.remove(&path(4));
     assert!(oldest_first(all, &[s.clone(), s], &[0, 1]).is_err());
 }
+
+#[test]
+fn old_dependencies_do_not_evict_recent_builds_before_older_garbage() {
+    use distributed_nix::gc::{PathMetadata, oldest_first};
+    let mut s = snapshot(&[], &[(1, &[]), (2, &[]), (3, &[1]), (4, &[3])]);
+    s.metadata = [(1, 1), (2, 20), (3, 10), (4, 100)]
+        .into_iter()
+        .map(|(n, age)| {
+            (
+                path(n),
+                PathMetadata {
+                    nar_size: 10,
+                    registered_at: age,
+                },
+            )
+        })
+        .collect();
+    let snapshots = [s.clone(), s];
+    let all = plan(&"a".repeat(32), &snapshots).unwrap();
+    let selected = oldest_first(all, &snapshots, &[0, 10]).unwrap();
+    assert_eq!(selected.origin, BTreeSet::from([path(2)]));
+    assert_eq!(selected.keep, BTreeSet::from([path(1), path(3), path(4)]));
+}

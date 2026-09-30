@@ -9,7 +9,7 @@ use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, BinaryHeap},
     fs,
     path::{Path, PathBuf},
     process::Command,
@@ -140,6 +140,26 @@ pub fn oldest_first(mut all: Plan, snapshots: &[Snapshot], wanted: &[u64]) -> Re
                     .entry(reference.clone())
                     .or_default()
                     .insert(path.clone());
+            }
+        }
+    }
+    // A dependency is as recent as the newest closure that still needs it.
+    let mut recent: BinaryHeap<_> = ages
+        .iter()
+        .map(|(path, age)| (*age, path.clone()))
+        .collect();
+    while let Some((age, path)) = recent.pop() {
+        if ages[&path] != age {
+            continue;
+        }
+        for snapshot in snapshots {
+            for reference in snapshot.graph.get(&path).into_iter().flatten() {
+                if let Some(previous) = ages.get_mut(reference) {
+                    if *previous < age {
+                        *previous = age;
+                        recent.push((age, reference.clone()));
+                    }
+                }
             }
         }
     }
