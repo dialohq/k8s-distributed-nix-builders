@@ -130,6 +130,11 @@ fn pod_roots_require_both_pod_retirement_and_lease_release() -> Result<()> {
     ensure!(node.client_roots()?.contains(LIVE));
     node.prune_client_roots(&BTreeSet::new())?;
     ensure!(node.client_roots()?.is_empty());
+    let usage = rusqlite::Connection::open(node.base.join("cache-usage.sqlite"))?;
+    let used: u64 = usage.query_row("SELECT used_at FROM uses WHERE path=?1", [LIVE], |r| {
+        r.get(0)
+    })?;
+    ensure!(used > 0);
     owner.finish()?;
     ensure!(
         fs::read_dir(node.base.join("client-roots"))?
