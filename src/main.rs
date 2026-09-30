@@ -82,7 +82,15 @@ fn execute() -> Result<()> {
         });
     }
     if args[0] == "native-transfer" {
-        return distributed_nix::native::serve_transfer(std::path::Path::new(arg(&args, 1)?));
+        let writable = match arg(&args, 2)? {
+            "import" => true,
+            "export" => false,
+            _ => bail!("native transfer requires import or export mode"),
+        };
+        return distributed_nix::native::serve_transfer(
+            std::path::Path::new(arg(&args, 1)?),
+            writable,
+        );
     }
     if args[0] == "native-gc" {
         distributed_nix::node::enter_chroot(arg(&args, 1)?)?;

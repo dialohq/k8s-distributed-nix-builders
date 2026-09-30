@@ -30,6 +30,11 @@ async fn native_stream_publication_is_authenticated_retryable_and_cannot_collect
     fs::create_dir_all(&node.root)?;
     durable(&node.base.join("ready"), &json!(true))?;
     native::valid_paths(&node.origin, &[])?;
+    native::valid_paths(&node.root, &[])?;
+    let reader = rusqlite::Connection::open(node.root.join("nix/var/nix/db/db.sqlite"))?;
+    reader.execute_batch(
+        "PRAGMA wal_checkpoint(TRUNCATE); BEGIN; SELECT count(*) FROM ValidPaths;",
+    )?;
     fs::write(base.join("input"), vec![b'x'; 1024 * 1024])?;
     let source = base.join("source");
     let added = output(
@@ -133,6 +138,23 @@ async fn native_stream_publication_is_authenticated_retryable_and_cannot_collect
     .await??;
     ensure!(!forbidden.status.success());
     ensure!(String::from_utf8_lossy(&forbidden.stderr).contains("administrator coordinator"));
+    fs::write(base.join("upload"), "worker exports must reject uploads")?;
+    let added = output(
+        Command::new("nix-store")
+            .arg("--store")
+            .arg(&node.origin)
+            .arg("--add")
+            .arg(base.join("upload")),
+    )?;
+    let upload = String::from_utf8(added.stdout)?.trim().to_owned();
+    let origin = node.origin.clone();
+    let export_uri = source.to_str().unwrap().to_owned();
+    let paths = vec![upload.clone()];
+    let rejected = tokio::task::spawn_blocking(move || native::copy(&origin, &export_uri, &paths))
+        .await?
+        .unwrap_err();
+    ensure!(rejected.to_string().contains("export-only"));
+    ensure!(native::valid_paths(&node.root, &[upload])? == json!([]));
     let bad = StoreRequest {
         operation: Operation::Publication as i32,
         batch: "../../etc/passwd".into(),

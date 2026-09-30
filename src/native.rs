@@ -27,9 +27,9 @@ unsafe extern "C" {
         result: *mut Buffer,
     ) -> i32;
     fn distributed_nix_buffer_free_v1(buffer: *mut Buffer);
-    fn distributed_nix_serve_transfer_v1(
+    fn distributed_nix_serve_transfer_v2(
         store: *const c_char,
-        trusted: i32,
+        writable: i32,
         result: *mut Buffer,
     ) -> i32;
     fn distributed_nix_serve_v1(trusted: i32, result: *mut Buffer) -> i32;
@@ -240,14 +240,15 @@ pub fn online_snapshot(root: &Path) -> Result<Value> {
 }
 
 /// Serve one bounded transport session in a dedicated process.
-pub fn serve_transfer(root: &Path) -> Result<()> {
+pub fn serve_transfer(root: &Path, writable: bool) -> Result<()> {
     let uri = CString::new(root.as_os_str().as_bytes())?;
     let mut output = Buffer {
         data: std::ptr::null_mut(),
         len: 0,
     };
     // SAFETY: valid URI and uniquely owned result; the C ABI catches exceptions.
-    let status = unsafe { distributed_nix_serve_transfer_v1(uri.as_ptr(), 1, &mut output) };
+    let status =
+        unsafe { distributed_nix_serve_transfer_v2(uri.as_ptr(), writable as i32, &mut output) };
     if status != 0 {
         ensure!(
             !output.data.is_null() && output.len <= isize::MAX as usize,

@@ -254,13 +254,9 @@ impl StoreTransport for Service {
         } else {
             &self.node.root
         };
-        let uri = if origin {
-            root.display().to_string()
-        } else {
-            format!("{}?read-only=true", root.display())
-        };
+        // Nix read-only mode opens SQLite as immutable, ignoring live WAL commits.
         let mut child = tokio::process::Command::new(&self.executable)
-            .arg("native-transfer").arg(uri).env("NIX_CONFIG", "experimental-features = nix-command flakes ca-derivations read-only-local-store\nbuild-users-group =\nmax-jobs = 0\n")
+            .arg("native-transfer").arg(root).arg(if origin { "import" } else { "export" }).env("NIX_CONFIG", "experimental-features = nix-command flakes ca-derivations\nbuild-users-group =\nmax-jobs = 0\n")
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit()).kill_on_drop(true).spawn().map_err(status)?;
         let mut input = child.stdin.take().unwrap();
         let mut output = child.stdout.take().unwrap();
