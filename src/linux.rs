@@ -68,8 +68,11 @@ fn mount_id(path: &Path) -> Result<u64> {
     Ok(stat.stx_mnt_id)
 }
 pub fn mountpoint(path: &Path) -> Result<bool> {
-    if !path.try_exists()? {
-        return Ok(false);
+    match path.symlink_metadata() {
+        Ok(metadata) if metadata.is_symlink() => return Ok(false),
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
     }
     let path = std::fs::canonicalize(path)?;
     let Some(parent) = path.parent() else {

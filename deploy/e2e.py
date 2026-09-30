@@ -108,6 +108,14 @@ ca_output = build(builders[0], ca)
 for pod in builders[1:]:
     assert eventually(lambda pod=pod: build(pod, ca, no_build=True)) == ca_output
 passed('content_addressed_reuse')
+symlink_expression = '''let r = builtins.fromJSON (builtins.readFile /etc/distributed-nix/runtime.json); in
+    derivation { name = "%s-symlink"; system = builtins.currentSystem;
+      builder = "${builtins.storePath r.bash}/bin/bash";
+      args = [ "-ec" "${builtins.storePath r.coreutils}/bin/ln -s ${builtins.storePath r.coreutils} $out" ];
+    }''' % name
+symlink_output = build(builders[0], symlink_expression)
+assert eventually(lambda: build(builders[1], symlink_expression, no_build=True)) == symlink_output
+symlink_target = execute(builders[1], 'readlink', symlink_output).stdout.strip()
 check_recreated_path(execute, store, builders[1])
 passed('recreated_path_native_admission')
 replace(builders[2])
@@ -210,5 +218,9 @@ budgeted = json.loads(execute(store, 'env',
 assert budgeted['bytes_freed'] > 0 and budgeted['pressure_remaining'], budgeted
 assert execute(store, 'test', '-e', '/srv/distributed-nix/origin' + output, check=False).returncode != 0
 passed('unrooted_output_collected')
+assert execute(store, 'test', '-L', '/srv/distributed-nix/origin' + symlink_output, check=False).returncode != 0
+for pod in [store, *builders]:
+    execute(pod, 'test', '-x', symlink_target + '/bin/ln')
+passed('symlink_collected_without_unmounting_live_target')
 report['elapsed_seconds'] = round(time.monotonic() - started, 2)
 print(json.dumps(report, indent=2), flush=True)
