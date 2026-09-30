@@ -178,6 +178,21 @@ fn mounted_relocation_reclaims_payloads_and_recovers_crashes() -> Result<()> {
     ensure!(!linux::mountpoint(&target(&node, &paths[0]))?);
     ensure!(node.relocate(&[], &BTreeSet::new())?["relocated"] == 1);
     verify(&node, &paths)?;
+    for (index, path) in paths.iter().enumerate() {
+        let alias = temp.path().join(format!("mount-alias-{index}"));
+        symlink(target(&node, path), &alias)?;
+        ensure!(!linux::mountpoint(&alias)?, "a symlink is not a mount");
+        fs::remove_file(&alias)?;
+        ensure!(linux::mountpoint(&target(&node, path))?);
+    }
+    let parent_alias = temp.path().join("worker-alias");
+    symlink(&node.root, &parent_alias)?;
+    ensure!(linux::mountpoint(
+        &parent_alias.join(paths[0].trim_start_matches('/'))
+    )?);
+    let dangling = temp.path().join("dangling");
+    symlink(temp.path().join("missing"), &dangling)?;
+    ensure!(!linux::mountpoint(&dangling)?);
     ensure!(native::dump(&node.root, &paths)?.paths == metadata.paths);
     for path in &paths {
         let to = target(&node, path);
