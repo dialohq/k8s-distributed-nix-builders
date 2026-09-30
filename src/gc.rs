@@ -29,6 +29,8 @@ pub struct Snapshot {
     pub graph: BTreeMap<String, BTreeSet<String>>,
     #[serde(default)]
     pub metadata: BTreeMap<String, PathMetadata>,
+    #[serde(default)]
+    pub last_used: BTreeMap<String, u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -110,7 +112,7 @@ pub fn plan(id: &str, snapshots: &[Snapshot]) -> Result<Plan> {
     p.validate()?;
     Ok(p)
 }
-/// Select oldest registered garbage first, including any unrooted referrers.
+/// Select least recently used garbage first, including any unrooted referrers.
 /// NAR sizes estimate reclaimable bytes; native deletion still enforces liveness.
 pub fn oldest_first(mut all: Plan, snapshots: &[Snapshot], wanted: &[u64]) -> Result<Plan> {
     ensure!(
@@ -132,9 +134,12 @@ pub fn oldest_first(mut all: Plan, snapshots: &[Snapshot], wanted: &[u64]) -> Re
                 .metadata
                 .get(path)
                 .context("GC snapshot lacks size/age metadata; upgrade every participant")?;
+            let used = metadata
+                .registered_at
+                .max(snapshot.last_used.get(path).copied().unwrap_or(0));
             ages.entry(path.clone())
-                .and_modify(|age: &mut u64| *age = (*age).max(metadata.registered_at))
-                .or_insert(metadata.registered_at);
+                .and_modify(|age: &mut u64| *age = (*age).max(used))
+                .or_insert(used);
             for reference in refs {
                 reverse
                     .entry(reference.clone())

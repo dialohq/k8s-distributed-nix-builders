@@ -5,6 +5,7 @@ fn path(n: u8) -> String {
 }
 fn snapshot(live: &[u8], edges: &[(u8, &[u8])]) -> Snapshot {
     Snapshot {
+        last_used: BTreeMap::new(),
         metadata: BTreeMap::new(),
         live: live.iter().map(|n| path(*n)).collect(),
         graph: edges
@@ -18,6 +19,7 @@ fn union_roots_keep_cross_node_dependencies_and_dead_cycles_collect() {
     let a = snapshot(&[1], &[(1, &[2]), (2, &[]), (4, &[5]), (5, &[4])]);
     let b = snapshot(&[], &[(1, &[3]), (2, &[]), (3, &[])]);
     let empty = Snapshot {
+        last_used: BTreeMap::new(),
         metadata: BTreeMap::new(),
         live: BTreeSet::new(),
         graph: BTreeMap::new(),
@@ -114,4 +116,32 @@ fn old_dependencies_do_not_evict_recent_builds_before_older_garbage() {
     let selected = oldest_first(all, &snapshots, &[0, 10]).unwrap();
     assert_eq!(selected.origin, BTreeSet::from([path(2)]));
     assert_eq!(selected.keep, BTreeSet::from([path(1), path(3), path(4)]));
+}
+
+#[test]
+fn reuse_on_one_worker_refreshes_the_shared_closure_without_pinning_it() {
+    use distributed_nix::gc::{PathMetadata, oldest_first};
+    let mut origin = snapshot(&[], &[(1, &[]), (2, &[1]), (3, &[])]);
+    origin.metadata = [(1, 1), (2, 2), (3, 50)]
+        .into_iter()
+        .map(|(n, age)| {
+            (
+                path(n),
+                PathMetadata {
+                    nar_size: 10,
+                    registered_at: age,
+                },
+            )
+        })
+        .collect();
+    let mut worker = origin.clone();
+    worker.last_used.insert(path(2), 100);
+    let snapshots = [worker, origin];
+    let all = plan(&"a".repeat(32), &snapshots).unwrap();
+    assert!(all.keep.is_empty());
+    let selected = oldest_first(all.clone(), &snapshots, &[0, 10]).unwrap();
+    assert_eq!(selected.origin, BTreeSet::from([path(3)]));
+    assert_eq!(selected.keep, BTreeSet::from([path(1), path(2)]));
+    let selected = oldest_first(all, &snapshots, &[0, 30]).unwrap();
+    assert_eq!(selected.origin.len(), 3);
 }

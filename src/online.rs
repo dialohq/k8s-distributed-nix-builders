@@ -192,6 +192,7 @@ impl Node {
             }
             let roots = self.root.join(ROOTS).join(&name);
             if roots.exists() {
+                crate::cache_usage::CacheUsage::open(&self.base)?.record(&roots)?;
                 fs::remove_dir_all(roots)?;
             }
             fs::remove_dir_all(entry.path())?;
@@ -295,6 +296,7 @@ impl Node {
         let mut snapshot: Snapshot =
             serde_json::from_value(self.gc_native(root, "online-snapshot", &Value::Null)?)?;
         if !origin {
+            crate::cache_usage::CacheUsage::open(&self.base)?.apply(&mut snapshot)?;
             snapshot.live.extend(self.client_roots()?);
             snapshot
                 .live
@@ -615,6 +617,7 @@ mod tests {
         let plan = plan();
         let mut snapshots = vec![
             Snapshot {
+                last_used: Default::default(),
                 metadata: Default::default(),
                 live: BTreeSet::new(),
                 graph: std::collections::BTreeMap::from([
