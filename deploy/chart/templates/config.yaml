@@ -1,5 +1,8 @@
 {{- if lt (int .Values.builders.replicas) 1 }}{{ fail "builders.replicas must be at least 1" }}{{ end }}
-{{- if or (lt (int .Values.gc.minFreePercent) 1) (gt (int .Values.gc.minFreePercent) 99) }}{{ fail "gc.minFreePercent must be 1–99" }}{{ end }}
+{{- if or (lt (int .Values.gc.minFreePercent) 1) (ge (int .Values.gc.minFreePercent) (int .Values.gc.targetFreePercent)) (ge (int .Values.gc.targetFreePercent) 100) }}{{ fail "require 0 < gc.minFreePercent < gc.targetFreePercent < 100" }}{{ end }}
+{{- if and (ne (int64 .Values.gc.maxStoreBytes) 0) (or (le (int64 .Values.gc.targetStoreBytes) 0) (ge (int64 .Values.gc.targetStoreBytes) (int64 .Values.gc.maxStoreBytes))) }}{{ fail "require 0 < gc.targetStoreBytes < gc.maxStoreBytes" }}{{ end }}
+{{- if and (eq (int64 .Values.gc.maxStoreBytes) 0) (ne (int64 .Values.gc.targetStoreBytes) 0) }}{{ fail "gc.targetStoreBytes requires gc.maxStoreBytes" }}{{ end }}
+{{- if lt (int .Values.gc.publicationMaxAgeSeconds) 1 }}{{ fail "gc.publicationMaxAgeSeconds must be positive" }}{{ end }}
 {{- if lt (int .Values.gc.intervalSeconds) 1 }}{{ fail "gc.intervalSeconds must be positive" }}{{ end }}
 {{- $name := include "dn.name" . }}
 {{- $domain := printf "%s.svc.%s" .Release.Namespace .Values.clusterDomain }}

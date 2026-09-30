@@ -1,6 +1,6 @@
 //! Authenticated, typed GC coordination on the private cluster network.
 use crate::{
-    gc::{Plan, Snapshot, plan, remove_file},
+    gc::{Plan, Policy, Snapshot, oldest_first, plan, remove_file},
     node::Node,
     online_rpc::wire::{
         GcReply, GcRequest,
@@ -110,6 +110,7 @@ impl Service {
             let _operation =
                 Lock::acquire(&service.node.base.join("online-operation.lock"), false)?;
             match op {
+                "maintain" => service.node.maintain(&request.epoch),
                 "preflight" => {
                     let (required, all) = service.config.pods()?;
                     let mut report =
@@ -170,6 +171,9 @@ impl Service {
 }
 #[tonic::async_trait]
 impl OnlineGc for Service {
+    async fn maintain(&self, r: Request<GcRequest>) -> Result<Response<GcReply>, Status> {
+        self.operation(r, "maintain").await
+    }
     async fn preflight(&self, r: Request<GcRequest>) -> Result<Response<GcReply>, Status> {
         self.operation(r, "preflight").await
     }
@@ -237,6 +241,7 @@ impl Client {
             .metadata_mut()
             .insert("authorization", self.token.clone());
         let reply = match op {
+            "maintain" => self.client.maintain(request).await,
             "preflight" => self.client.preflight(request).await,
             "snapshot" => self.client.snapshot(request).await,
             "prepare" => self.client.prepare(request).await,
@@ -295,7 +300,7 @@ pub async fn collect(
     node: &Node,
     config: &Config,
     dry: bool,
-    threshold: Option<u8>,
+    policy: Option<Policy>,
 ) -> Result<Value> {
     config.validate()?;
     ensure!(config.index == 0, "run coordinator on origin node");
@@ -327,9 +332,10 @@ pub async fn collect(
             token: token.clone(),
         });
     }
+    let mut goals = None;
     // Finishing is idempotent even if a peer already removed its marker.
     if state["phase"] != "finish" {
-        let mut pressure = false;
+        let mut reports = Vec::new();
         for (index, client) in clients.iter_mut().enumerate() {
             let report = client.call("preflight", &id, false, None).await?;
             ensure!(
@@ -340,26 +346,32 @@ pub async fn collect(
                 report["index"] == index,
                 "GC endpoint has the wrong node identity"
             );
-            if let Some(percent) = threshold {
-                ensure!(
-                    (1..=100).contains(&percent),
-                    "invalid disk pressure threshold"
-                );
-                pressure |= u128::from(report["available"].as_u64().context("available blocks")?)
-                    * 100
-                    < u128::from(report["blocks"].as_u64().context("total blocks")?)
-                        * u128::from(percent);
+            reports.push(report);
+        }
+        if !dry && !file.exists() {
+            for (index, client) in clients.iter_mut().enumerate() {
+                client.call("maintain", &id, false, None).await?;
+                reports[index] = client.call("preflight", &id, false, None).await?;
             }
         }
-        if threshold.is_some() && !pressure && !file.exists() {
-            return Ok(json!({"skipped":"no shared-store disk pressure"}));
+        if let Some(policy) = &policy {
+            let (pressure, wanted) = policy.goals(&reports)?;
+            if !pressure && !file.exists() {
+                return Ok(json!({"skipped":"below cache budget and disk pressure thresholds"}));
+            }
+            goals = Some(wanted);
         }
     }
     if state.get("candidates").is_none() {
         if !dry && !file.exists() {
             discard_abandoned_publications(node)?;
         }
-        let candidate = plan(&id, &snapshots(&mut clients, &id).await?)?;
+        let snapshots = snapshots(&mut clients, &id).await?;
+        let mut candidate = plan(&id, &snapshots)?;
+        if let Some(wanted) = goals {
+            candidate = oldest_first(candidate, &snapshots, &wanted)?;
+            state["requested_bytes"] = json!(wanted);
+        }
         if dry {
             return Ok(json!({"dry_run":true,"plan":candidate}));
         }

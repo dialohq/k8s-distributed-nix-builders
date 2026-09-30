@@ -303,24 +303,26 @@ nlohmann::json invoke(uint32_t op, const char *uri, const nlohmann::json &input)
         } else local->collectGarbage(options, live);
         auto paths = store->queryAllValidPaths();
         std::map<std::string, std::set<std::string>> graph;
+        nlohmann::json metadata = nlohmann::json::object();
         for (const auto &p : paths) {
             auto name = store->printStorePath(p);
             auto info = store->queryPathInfo(p);
+            metadata[name] = {{"nar_size", info->narSize}, {"registered_at", info->registrationTime}};
             auto &edges = graph[name];
             for (const auto &ref : info->references) edges.insert(store->printStorePath(ref));
             // CA outputs need not appear in the static DerivationOutputs table.
             if (info->deriver && store->isValidPath(*info->deriver)) {
                 auto d = store->printStorePath(*info->deriver);
-                edges.insert(d); graph[d].insert(name);
+                if (nix::settings.gcKeepDerivations) edges.insert(d);
+                if (nix::settings.gcKeepOutputs) graph[d].insert(name);
             }
-            // Conservatively retain valid derivations and their outputs together.
-            // This also covers either native keep-derivations/keep-outputs setting.
             for (const auto &drv : store->queryValidDerivers(p)) {
                 auto d = store->printStorePath(drv);
-                edges.insert(d); graph[d].insert(name);
+                if (nix::settings.gcKeepDerivations) edges.insert(d);
+                if (nix::settings.gcKeepOutputs) graph[d].insert(name);
             }
         }
-        return {{"live", live.paths}, {"graph", graph}};
+        return {{"live", live.paths}, {"graph", graph}, {"metadata", metadata}};
     }
     if (op == DISTRIBUTED_NIX_GC_DELETE) {
         nix::GCOptions options; options.action = nix::GCAction::gcDeleteSpecific;

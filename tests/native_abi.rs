@@ -298,7 +298,18 @@ fn native_transaction_roundtrip_conflict_and_concurrent_calls() -> Result<()> {
 }
 
 #[test]
-fn online_mark_keeps_recorded_ca_deriver_without_static_output_entry() -> Result<()> {
+fn online_mark_honors_both_retention_settings_for_ca_derivers() -> Result<()> {
+    let Ok(policy) = std::env::var("TEST_GC_RETENTION") else {
+        for policy in ["false false", "false true", "true false", "true true"] {
+            let (derivations, outputs) = policy.split_once(' ').unwrap();
+            output(Command::new(std::env::current_exe()?)
+                .args(["--exact", "online_mark_honors_both_retention_settings_for_ca_derivers", "--nocapture"])
+                .env("TEST_GC_RETENTION", policy)
+                .env("NIX_CONFIG", format!("experimental-features = nix-command flakes ca-derivations\nkeep-derivations = {derivations}\nkeep-outputs = {outputs}\nbuild-users-group =")))?;
+        }
+        return Ok(());
+    };
+    let (derivations, outputs) = policy.split_once(' ').unwrap();
     let tmp = tempfile::tempdir()?;
     let source = tmp.path().join("source");
     let target = tmp.path().join("target");
@@ -338,11 +349,15 @@ fn online_mark_keeps_recorded_ca_deriver_without_static_output_entry() -> Result
     std::os::unix::fs::symlink(&out, target.join("nix/var/nix/gcroots/live-ca-output"))?;
     let snapshot: distributed_nix::gc::Snapshot =
         serde_json::from_value(native::online_snapshot(&target)?)?;
+    ensure!(snapshot.graph[&out].contains(&drv) == (derivations == "true"));
+    ensure!(snapshot.graph[&drv].contains(&out) == (outputs == "true"));
+    ensure!(snapshot.metadata[&out].nar_size > 0);
     let plan = distributed_nix::gc::plan("00000000000000000000000000000001", &vec![snapshot; 4])?;
-    ensure!(
-        plan.keep.contains(&drv),
-        "live CA output lost its recorded deriver"
-    );
-    ensure!(plan.workers.iter().all(|paths| !paths.contains(&drv)) && !plan.origin.contains(&drv));
+    ensure!(plan.keep.contains(&drv) == (derivations == "true"));
+    fs::remove_file(target.join("nix/var/nix/gcroots/live-ca-output"))?;
+    std::os::unix::fs::symlink(&drv, target.join("nix/var/nix/gcroots/live-derivation"))?;
+    let snapshot = serde_json::from_value(native::online_snapshot(&target)?)?;
+    let plan = distributed_nix::gc::plan("00000000000000000000000000000001", &vec![snapshot; 4])?;
+    ensure!(plan.keep.contains(&out) == (outputs == "true"));
     Ok(())
 }

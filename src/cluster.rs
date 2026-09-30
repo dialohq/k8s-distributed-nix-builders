@@ -61,7 +61,7 @@ impl Cluster {
     pub fn len(&self) -> usize {
         self.clients.len()
     }
-    fn request(
+    pub(crate) fn request(
         &self,
         node: usize,
         operation: Operation,
@@ -135,9 +135,23 @@ impl Cluster {
             vec![],
         )?)
     }
-    pub fn admit(&self, node: usize, manifest: &Manifest) -> Result<Value> {
+    pub(crate) fn with_manifest<T>(
+        &self,
+        node: usize,
+        manifest: &Manifest,
+        operation: impl FnOnce(String) -> Result<T>,
+    ) -> Result<T> {
         let id = self.receive(node, manifest)?;
-        self.call_json(node, &["admit".into(), id])
+        let result = operation(id.clone());
+        let released = self.request(node, Operation::Release, &[], &id, vec![]);
+        let value = result?;
+        released?;
+        Ok(value)
+    }
+    pub fn admit(&self, node: usize, manifest: &Manifest) -> Result<Value> {
+        self.with_manifest(node, manifest, |id| {
+            self.call_json(node, &["admit".into(), id])
+        })
     }
     pub fn parallel<T: Send>(&self, f: impl Fn(usize) -> Result<T> + Sync) -> Result<Vec<T>> {
         std::thread::scope(|scope| {
@@ -158,7 +172,7 @@ impl Cluster {
             results.into_iter().collect()
         })
     }
-    fn lease(&self) -> Result<tonic::Streaming<crate::online_rpc::wire::Empty>> {
+    pub(crate) fn lease(&self) -> Result<tonic::Streaming<crate::online_rpc::wire::Empty>> {
         self.runtime.block_on(self.origin.lease())
     }
     fn copy(&self, source: usize, paths: &[String]) -> Result<()> {
@@ -218,8 +232,9 @@ impl Cluster {
             "invalid node"
         );
         m.validate()?;
-        let candidate = self.receive(0, m)?;
-        let canonical = self.call_json(0, &["canonical-manifest".into(), candidate])?;
+        let canonical = self.with_manifest(0, m, |id| {
+            self.call_json(0, &["canonical-manifest".into(), id])
+        })?;
         let canonical = Manifest::parse(canonical)?;
         let canonicalized: Vec<_> = m
             .paths
@@ -235,10 +250,11 @@ impl Cluster {
         let m = &canonical;
         let paths = &m.roots;
         let id = m.id()?;
-        let file = self.receive(0, &m)?;
-        self.call_json(0, &["reserve".into(), file.clone()])?;
-        self.copy(node, paths)?;
-        self.call_json(0, &["commit".into(), file])?;
+        self.with_manifest(0, m, |file| {
+            self.call_json(0, &["reserve".into(), file.clone()])?;
+            self.copy(node, paths)?;
+            self.call_json(0, &["commit".into(), file])
+        })?;
         let publish_seconds = start.elapsed().as_secs_f64();
         let results = std::thread::scope(|s| {
             let jobs: Vec<_> = targets
