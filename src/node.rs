@@ -413,8 +413,9 @@ impl Node {
             fs::create_dir_all(root.join(d))?;
         }
         fs::set_permissions(root.join("tmp"), fs::Permissions::from_mode(0o1777))?;
-        let mut passwd =
-            String::from("root:x:0:0:root:/root:/bin/sh\nnobody:x:65534:65534:nobody:/:/bin/sh\n");
+        let mut passwd = String::from(
+            "root:x:0:0:root:/root:/bin/sh\nnobody:x:65534:65534:nobody:/:/bin/sh\nsshd:x:65533:65534:SSH privilege separation:/var/empty:/bin/false\n",
+        );
         if m["githubRunner"].is_string() {
             passwd.push_str("runner:x:1001:1001:GitHub runner:/work:/bin/bash\n");
         }
@@ -483,14 +484,19 @@ impl Node {
         if !origin {
             bind(&self.base, &root.join("run/distributed-nix"))?;
         }
-        fs::write(
-            root.join("etc/nix/nix.conf"),
-            format!(
-                "{}\n{}\n",
-                m["nixConfig"].as_str().context("runtime nixConfig")?,
-                std::env::var("DISTRIBUTED_NIX_EXTRA_NIX_CONFIG").unwrap_or_default()
-            ),
-        )?;
+        let mut nix_config = format!(
+            "{}\n{}\n",
+            m["nixConfig"].as_str().context("runtime nixConfig")?,
+            std::env::var("DISTRIBUTED_NIX_EXTRA_NIX_CONFIG").unwrap_or_default()
+        );
+        let signing = Path::new("/run/secrets/nix-signing");
+        if !origin && signing.is_dir() {
+            let target = root.join("run/secrets/nix-signing");
+            fs::create_dir_all(&target)?;
+            bind(signing, &target)?;
+            nix_config.push_str("secret-key-files = /run/secrets/nix-signing/key\n");
+        }
+        fs::write(root.join("etc/nix/nix.conf"), nix_config)?;
         if !origin {
             // The runtime mounts the backend; admission only needs POSIX paths.
             ensure!(mountpoint(&self.lower)?, "shared collection is not mounted");
@@ -666,7 +672,11 @@ impl Node {
         fs::create_dir_all(&self.base)?;
         let op = arg(args, 0)?;
         if op == "connection" {
-            return self.connection(arg(args, 1)? == "trusted");
+            return self.connection(arg(args, 1)? == "trusted", false);
+        }
+        if op == "ssh-connection" {
+            // The SSH forced command never interprets SSH_ORIGINAL_COMMAND.
+            return self.connection(false, true);
         }
         if op == "runner-daemon" {
             return self.serve_with_ready(|| {

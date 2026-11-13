@@ -1,4 +1,8 @@
 {{- $name := include "dn.name" . }}
+{{- $trust := "" }}
+{{- if .Values.signing.publicKeys }}
+{{- $trust = printf "\nextra-trusted-public-keys = %s\n" (join " " .Values.signing.publicKeys) }}
+{{- end }}
 {{- range $role := list "store" "builder" }}
 {{- $values := ternary $.Values.store $.Values.builders (eq $role "store") }}
 ---
@@ -63,7 +67,14 @@ spec:
             - name: DISTRIBUTED_NIX_ARC_SLOTS
               value: {{ $.Values.builders.runnerSlots | quote }}
             - name: DISTRIBUTED_NIX_EXTRA_NIX_CONFIG
-              value: {{ $.Values.builders.extraNixConfig | quote }}
+              value: {{ printf "%s%s" $.Values.builders.extraNixConfig $trust | quote }}
+            {{- if $.Values.nativeBuilds.enabled }}
+            - name: DISTRIBUTED_NIX_SSH_CONFIG
+              value: /etc/distributed-nix/sshd_config
+            {{- end }}
+            {{- else if $trust }}
+            - name: DISTRIBUTED_NIX_EXTRA_NIX_CONFIG
+              value: {{ $trust | quote }}
             {{- end }}
             - name: DISTRIBUTED_NIX_POD_UID
               valueFrom:
@@ -88,6 +99,10 @@ spec:
           ports:
             - name: rpc
               containerPort: 9840
+            {{- if and (eq $role "builder") $.Values.nativeBuilds.enabled }}
+            - name: nix-ssh
+              containerPort: 2222
+            {{- end }}
             {{- if eq $role "store" }}
             - name: nfs
               containerPort: 2049
@@ -115,6 +130,20 @@ spec:
             - name: token
               mountPath: /run/secrets/controller
               readOnly: true
+            {{- if and (eq $role "builder") $.Values.nativeBuilds.enabled }}
+            - name: config
+              mountPath: /etc/distributed-nix/sshd_config
+              subPath: sshd_config
+              readOnly: true
+            - name: native-build
+              mountPath: /run/secrets/native-build
+              readOnly: true
+            {{- end }}
+            {{- if and (eq $role "builder") $.Values.signing.existingSecret }}
+            - name: nix-signing
+              mountPath: /run/secrets/nix-signing
+              readOnly: true
+            {{- end }}
       volumes:
         - name: config
           configMap:
@@ -123,6 +152,26 @@ spec:
           secret:
             secretName: {{ include "dn.secret" $ }}
             defaultMode: 256
+        {{- if and (eq $role "builder") $.Values.nativeBuilds.enabled }}
+        - name: native-build
+          secret:
+            secretName: {{ required "nativeBuilds.existingSecret is required" $.Values.nativeBuilds.existingSecret }}
+            defaultMode: 256
+            items:
+              - key: authorized_keys
+                path: authorized_keys
+              - key: ssh_host_ed25519_key
+                path: ssh_host_ed25519_key
+        {{- end }}
+        {{- if and (eq $role "builder") $.Values.signing.existingSecret }}
+        - name: nix-signing
+          secret:
+            secretName: {{ $.Values.signing.existingSecret }}
+            defaultMode: 256
+            items:
+              - key: key
+                path: key
+        {{- end }}
   volumeClaimTemplates:
     - metadata:
         name: data

@@ -74,15 +74,19 @@ fn lease_owner() -> Result<()> {
     let mut socket = UnixStream::connect(directory.join("control"))?;
     let held: Box<dyn std::any::Any> = match kind.as_str() {
         "lock" => Box::new(Lock::acquire(&directory.join("lock"), false)?),
-        "group" => {
+        "group" | "connection" => {
             let node = node(&directory);
-            let group = group(&node.base, &node.root, Some("pod-uid"))?;
-            // The root's target may be absent; liveness is a metadata contract.
-            std::os::unix::fs::symlink(
-                LIVE,
+            let pod = (kind == "group").then_some("pod-uid");
+            let group = group(&node.base, &node.root, pod)?;
+            let roots = fs::read_dir(
                 node.root
-                    .join("nix/var/nix/gcroots/distributed-nix-clients/pod-pod-uid/live"),
-            )?;
+                    .join("nix/var/nix/gcroots/distributed-nix-clients"),
+            )?
+            .next()
+            .unwrap()?
+            .path();
+            // The root's target may be absent; liveness is a metadata contract.
+            std::os::unix::fs::symlink(LIVE, roots.join("live"))?;
             Box::new(group)
         }
         _ => anyhow::bail!("unknown owner mode"),
@@ -141,5 +145,19 @@ fn pod_roots_require_both_pod_retirement_and_lease_release() -> Result<()> {
             .next()
             .is_none()
     );
+    Ok(())
+}
+
+#[test]
+fn connection_roots_retire_after_lease_release_without_pod_replacement() -> Result<()> {
+    let mut owner = Owner::start("connection")?;
+    let node = node(owner.directory.path());
+    let running_pods = BTreeSet::from(["pod-uid".into()]);
+    node.prune_client_roots(&running_pods)?;
+    ensure!(node.client_roots()?.contains(LIVE));
+    owner.release()?;
+    node.prune_client_roots(&running_pods)?;
+    ensure!(node.client_roots()?.is_empty());
+    owner.finish()?;
     Ok(())
 }

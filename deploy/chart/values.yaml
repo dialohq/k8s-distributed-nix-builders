@@ -7,6 +7,11 @@ clusterDomain: cluster.local
 auth:
   # Recommended for GitOps. Secret must contain a 32–256 byte `token` key.
   existingSecret: ""
+signing:
+  # Optional server-side Nix output signing. Secret contains a `key` private key.
+  existingSecret: ""
+  # Trusted by all pool participants; required when a signing Secret is set.
+  publicKeys: []
 store:
   storageClass: ""
   storage: 100Gi
@@ -42,3 +47,11 @@ tolerations: []
 
 # Namespace and pod selectors for authenticated ARC attachment clients.
 arcClients: []
+
+# Optional stock Nix ssh-ng endpoint, separate from the gRPC admin credential.
+nativeBuilds:
+  enabled: false
+  # Required when enabled. Keys: authorized_keys, ssh_host_ed25519_key.
+  existingSecret: ""
+  # NetworkPolicy peers allowed to TCP 2222 (namespace/pod selectors or ipBlock).
+  clients: []

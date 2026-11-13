@@ -44,6 +44,14 @@ lease closure, covering shells that outlive their Nix connection. ARC jobs use
 their own group; the runner service holds its lease until the entire job cgroup
 is empty. A cleanup failure retains the lease until the poisoned builder exits.
 
+Opt-in native SSH clients instead use a unique connection group with no pod UID.
+Its flock lease covers the worker connection, including builds and output copies;
+the next online GC can prune it after worker exit, without pod replacement.
+Server SSH keepalives close unresponsive clients; they do not expire a live
+lease. Suspending a VM can fail its in-flight remote build/copy. A completed
+ordinary `nix build` has already copied outputs back to the guest's local store.
+See [native builds](deploy/NATIVE-BUILDS.md) for authentication and guest setup.
+
 Published local directories and large files can be reclaimed independently of
 shared GC. Relocation fences native connections, excludes active GC epochs and
 all live client/runtime closures, then replaces matching local payloads with

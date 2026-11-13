@@ -25,3 +25,22 @@ spec:
         - protocol: TCP
           port: 9840
     {{- end }}
+{{- if and .Values.nativeBuilds.enabled .Values.nativeBuilds.clients }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "dn.name" . }}-native-builds
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "dn.labels" . | nindent 6 }}
+      app.kubernetes.io/component: builder
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        {{- toYaml .Values.nativeBuilds.clients | nindent 8 }}
+      ports:
+        - protocol: TCP
+          port: 2222
+{{- end }}
