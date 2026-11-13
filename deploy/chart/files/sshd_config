@@ -1,0 +1,23 @@
+Port 2222
+HostKey /run/secrets/native-build/ssh_host_ed25519_key
+PidFile /run/sshd/native-build.pid
+AuthorizedKeysFile /run/secrets/native-build/authorized_keys
+AuthenticationMethods publickey
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+UsePAM no
+PermitRootLogin prohibit-password
+AllowUsers root
+StrictModes yes
+DisableForwarding yes
+PermitTTY no
+PermitTunnel no
+X11Forwarding no
+PermitUserEnvironment no
+PermitUserRC no
+ForceCommand /bin/distributed-nix node ssh-connection
+ClientAliveInterval 15
+ClientAliveCountMax 3
+LoginGraceTime 30
+MaxAuthTries 3

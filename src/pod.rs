@@ -445,6 +445,16 @@ async fn start(role: Role, processes: &mut Processes, nfs: &mut KernelNfs) -> Re
     fs::write("/run/distributed-nix-ready", b"")?;
     if role == Role::Builder {
         processes.daemon("published store relocation", &mut controller(&["node", "relocator"])?)?;
+        if let Some(config) = std::env::var_os("DISTRIBUTED_NIX_SSH_CONFIG") {
+            fs::create_dir_all("/var/empty")?;
+            fs::create_dir_all("/run/sshd")?;
+            processes.daemon(
+                "native build SSH server",
+                Command::new("/bin/sshd")
+                    .args(["-D", "-e", "-f"])
+                    .arg(config),
+            )?;
+        }
     }
     Ok(())
 }

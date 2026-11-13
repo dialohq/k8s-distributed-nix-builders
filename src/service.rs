@@ -145,8 +145,12 @@ pub unsafe extern "C" fn distributed_nix_runtime_v1(
     status
 }
 
-pub fn native_connection(root: &str, trusted: bool) -> Result<()> {
-    let group = crate::online::native_group(Path::new(root))?;
+pub fn native_connection(root: &str, trusted: bool, connection_roots: bool) -> Result<()> {
+    let group = if connection_roots {
+        crate::online::group(Path::new(crate::node::BASE), Path::new(root), None)?
+    } else {
+        crate::online::native_group(Path::new(root))?
+    };
     group.activate()?;
     for file in ["/proc", "/etc/resolv.conf"] {
         crate::linux::bind(Path::new(file), Path::new(&format!("{root}{file}")))?;
@@ -216,7 +220,7 @@ impl Node {
         }
         Ok(json!({"enqueued":records.len()}))
     }
-    pub fn connection(&self, trusted: bool) -> Result<Value> {
+    pub fn connection(&self, trusted: bool, connection_roots: bool) -> Result<Value> {
         let gate = Lock::acquire(&self.base.join("maintenance.lock"), true)?;
         ensure!(
             self.base.join("ready").exists(),
@@ -236,6 +240,11 @@ impl Node {
             .arg("native-daemon")
             .arg(&self.root)
             .arg(if trusted { "trusted" } else { "untrusted" })
+            .arg(if connection_roots {
+                "connection"
+            } else {
+                "pod"
+            })
             .env("PATH", path)
             .env("HOME", "/root")
             .exec()

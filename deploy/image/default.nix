@@ -1,6 +1,6 @@
 {pkgs, package, githubRunner ? null}: let
   nix = pkgs.nixVersions.latest;
-  runtime = with pkgs; [nix bash coreutils tini util-linux findutils gnugrep gnused gnutar gzip git gcc gnumake pkg-config cacert python3 nfs-utils iana-etc package] ++ pkgs.lib.optionals (githubRunner != null) [githubRunner pkgs.openssh pkgs.jq pkgs.nix-fast-build pkgs.rsync];
+  runtime = with pkgs; [nix bash coreutils tini util-linux findutils gnugrep gnused gnutar gzip git gcc gnumake pkg-config cacert python3 nfs-utils iana-etc openssh package] ++ pkgs.lib.optionals (githubRunner != null) [githubRunner pkgs.jq pkgs.nix-fast-build pkgs.rsync];
   runtimeJSON = pkgs.writeText "runtime.json" (builtins.toJSON ({
     inherit runtime nix;
     seed = runtime ++ [pkgs.path];
@@ -39,6 +39,7 @@ in pkgs.dockerTools.buildLayeredImage {
     rm -rf etc/distributed-nix
     mkdir -p etc/distributed-nix usr/bin
     ln -sf ${package}/bin/distributed-nix bin/distributed-nix
+    ln -sf ${pkgs.openssh}/bin/sshd bin/sshd
     ln -sf /proc/mounts etc/mtab
     cp ${files}/etc/distributed-nix/runtime.json etc/distributed-nix/runtime.json
     rm -f etc/passwd etc/group

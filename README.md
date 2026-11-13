@@ -52,6 +52,11 @@ The store pod serves NFSv4 using Linux kernel NFSD in its own network namespace 
 - A single store pod is a storage availability dependency. Pod replacement recovers its PVC; this is not a highly available NFS service.
 - Nix is pinned to **2.33.6** because the C++ integration is version-sensitive. The optional ARC image and authenticated runner attachment are described in [deploy/ARC.md](deploy/ARC.md). ARC clients reserve one slot per warm builder; increasing ARC runner counts does not resize pool membership.
 
+For ordinary remote `nix build` from RoamVM or other clients, the optional
+[native SSH endpoint](deploy/NATIVE-BUILDS.md) uses separate SSH credentials and
+per-connection root leases. It is disabled by default and does not require the
+guest to receive the pool's administration token.
+
 Conflicting content-addressed realisations remain errors and retain their pending roots. Unrelated outputs continue publishing. Startup reports and defers conflicting shared publication batches while admitting compatible batches, so a retained local result does not prevent the builder from becoming ready. The deferred batches remain available for a later retry. The system does not resolve nondeterministic build outputs.
 
 ## Build and test

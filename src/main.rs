@@ -111,6 +111,7 @@ fn execute() -> Result<()> {
         return distributed_nix::service::native_connection(
             arg(&args, 1)?,
             arg(&args, 2)? == "trusted",
+            args.get(3).is_some_and(|mode| mode == "connection"),
         );
     }
     if args[0] == "pivot" {

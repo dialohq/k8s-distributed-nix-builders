@@ -33,3 +33,8 @@ spec:
     - name: rpc
       port: 9840
       targetPort: rpc
+    {{- if .Values.nativeBuilds.enabled }}
+    - name: nix-ssh
+      port: 2222
+      targetPort: nix-ssh
+    {{- end }}

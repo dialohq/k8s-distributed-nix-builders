@@ -4,6 +4,7 @@
 {{- if and (eq (int64 .Values.gc.maxStoreBytes) 0) (ne (int64 .Values.gc.targetStoreBytes) 0) }}{{ fail "gc.targetStoreBytes requires gc.maxStoreBytes" }}{{ end }}
 {{- if lt (int .Values.gc.publicationMaxAgeSeconds) 1 }}{{ fail "gc.publicationMaxAgeSeconds must be positive" }}{{ end }}
 {{- if lt (int .Values.gc.intervalSeconds) 1 }}{{ fail "gc.intervalSeconds must be positive" }}{{ end }}
+{{- if and .Values.signing.existingSecret (not .Values.signing.publicKeys) }}{{ fail "signing.publicKeys is required with signing.existingSecret" }}{{ end }}
 {{- $name := include "dn.name" . }}
 {{- $domain := printf "%s.svc.%s" .Release.Namespace .Values.clusterDomain }}
 {{- $members := list (printf "%s-store.%s:9840" $name $domain) }}
@@ -18,6 +19,10 @@ metadata:
     {{- include "dn.labels" . | nindent 4 }}
 data:
   participants.json: {{ dict "nodes" $members "token_file" "/run/secrets/controller/token" | toJson | quote }}
+  {{- if .Values.nativeBuilds.enabled }}
+  sshd_config: |
+    {{- .Files.Get "files/sshd_config" | nindent 4 }}
+  {{- end }}
 {{- if not .Values.auth.existingSecret }}
 ---
 {{- $previous := lookup "v1" "Secret" .Release.Namespace $name }}
